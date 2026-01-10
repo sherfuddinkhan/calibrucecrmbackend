@@ -882,43 +882,53 @@ Join us in celebrating the sacred union of
 Your presence will make our day complete! 💍✨`;
 
     const payload = {
-      name: template_name,
-      language: "en_US",
-      category: "MARKETING", // ✅ safer for invitations
-      components: [
+  name: template_name,
+  language: "en_US",
+  category: "MARKETING", // ✅ safer for invitations
+  components: [
+    {
+      type: "HEADER",
+      format: "IMAGE",
+      example: {
+        header_handle: [header_media_id]
+      }
+    },
+    {
+      type: "BODY",
+      text: bodyText,
+      example: {
+        body_text: [placeholders]
+      }
+    },
+    {
+      type: "BUTTONS",  // ✅ wrap type + buttons in an object
+      buttons: [
         {
-          type: "HEADER",
-          format: "IMAGE",
-          example: {
-            header_handle: [header_media_id]
+          type: "QUICK_REPLY",
+          reply: {
+            id: "yes_attend",
+            title: "Yes, I'll attend"
           }
         },
         {
-          type: "BODY",
-          text: bodyText,
-          example: {
-            body_text: [placeholders]
+          type: "QUICK_REPLY",
+          reply: {
+            id: "no_cant_make",
+            title: "No, can't make it"
           }
         },
         {
-          type: "BUTTONS",
-          buttons: [
-            {
-              type: "QUICK_REPLY",
-              text: "Yes, I'll attend"
-            },
-            {
-              type: "QUICK_REPLY",
-              text: "No, can't make it"
-            },
-            {
-              type: "QUICK_REPLY",
-              text: "Will confirm later"
-            }
-          ]
+          type: "QUICK_REPLY",
+          reply: {
+            id: "will_confirm",
+            title: "Will confirm later"
+          }
         }
       ]
-    };
+    }
+  ]
+};
+
 
     const response = await axios.post(
       `https://graph.facebook.com/v20.0/${wabaId}/message_templates`,
@@ -1033,7 +1043,6 @@ app.post("/api/send-invitation", async (req, res) => {
             }
           }
         );
-
         results.push({ number: to, success: true });
       } catch (err) {
         results.push({
@@ -1444,8 +1453,6 @@ app.post("/create-template02", async (req, res) => {
     res.status(500).json({ error: error.response?.data || error.message });
   }
 });
-
-
 // Step 2: Send OTP
 app.post('/send-otp', async (req, res) => {
   try {
