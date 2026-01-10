@@ -1,3 +1,4 @@
+//////////////////////////////// START CRM calibruce ///////////////////////////////
 
 import 'dotenv/config';
 import express from 'express';
@@ -14,6 +15,9 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.json()); // Parses JSON from client
 app.use(express.urlencoded({ extended: true })); // Required for TwiML endpoint
+// ✅ ES Modules style
+import PQueue from 'p-queue';
+
 const API_VERSION = 'v22.0';
 import mime from 'mime-types';
 
@@ -31,7 +35,6 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PORT = process.env.BACKEND_PORT || 5000; // ✅ MATCH FRONTEND
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN
-
 
 // ==================================================
 // 1️⃣ REGISTER WEBHOOK VERIFY TOKEN (FROM FRONTEND)
@@ -51,7 +54,6 @@ app.post('/api/register-webhook-token', (req, res) => {
 
   res.json({ success: true });
 });
-
 
 // =======================================================
 // WHATSAPP WEBHOOK Verification
@@ -74,35 +76,23 @@ app.get('/webhook', (req, res) => {
   return res.status(403).send('Verification failed');
 });
 
-////////////webhook RAW Payload///////
-app.post("/webhook", (req, res) => {
-  console.log(
-    "📩 RAW WEBHOOK PAYLOAD:\n",
-    JSON.stringify(req.body, null, 2)
-  );
-  res.sendStatus(200);
-});
-/////////////////////////////////////
-
 // -------------------------------
 // 2. GLOBAL MIDDLEWARE
 // -------------------------------
-const allowedOrigins = [
-  "http://localhost:3000",
-  "http://localhost:3001"
-];
-
+// -------------------------------
+// CORS + BODY PARSERS + LOGGER
+// -------------------------------
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // allow REST tools like Postman
+    origin: (origin, callback) => {
+      // Allow server-side tools like Postman / curl
       if (!origin) return callback(null, true);
 
       if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("CORS not allowed"));
+        return callback(null, true);
       }
+
+      return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -110,62 +100,40 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: '1mb' }));
+// Body parsers
+app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// -------------------------------
-// 3. DEBUG LOGGER
-// -------------------------------
+// Debug logger (POST requests only)
 app.use((req, _res, next) => {
   if (req.method === "POST") {
     console.log("--------------------------------------------------");
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+    console.log(
+      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`
+    );
+    console.log("Request Body:");
     console.log(JSON.stringify(req.body, null, 2));
     console.log("--------------------------------------------------");
   }
   next();
 });
 
+// -------------------------------
+// ES MODULE __dirname SETUP
+// -------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 👉 API to fetch WhatsApp templates
-app.post("/api/templates", async (req, res) => {
-  const { wabaId, accessToken } = req.body;
-
-  if (!wabaId || !accessToken) {
-    return res.status(400).json({ error: "WABA ID and Access Token required" });
-  }
-
-  try {
-    const response = await axios.get(
-      `https://graph.facebook.com/v23.0/${wabaId}/message_templates`,
-      {
-        params: { fields: "name,status" },
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-    const templates = response.data.data.map(t => ({
-      name: t.name,
-      status: t.status,
-    }));
-
-    res.json({ templates });
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    res.status(500).json({ error: "Failed to fetch templates" });
-  }
-});
+const allowedOrigins = ["http://localhost:3000","http://localhost:3001"];
 
 
 // Setup Multer to handle file uploads, saving to the 'uploads' folder
-const upload2 = multer({ dest: "uploads/" });
+const upload2 = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
 
-// Middleware setup
 
-app.use(express.json()); // For parsing application/json (not used for this specific endpoint, but good practice)
 
 /** * Utility: Detect WhatsApp media type from MIME 
  * This is needed for the final /messages API call.
@@ -263,299 +231,294 @@ app.post("/upload1", upload2.single("file"), async (req, res) => {
 });
 
 
-// -------------------------------
-// 5. HELPERS
-// -------------------------------
-const normalize = (n = '') =>
-  typeof n === 'string'
-    ? n.replace(/\s+/g, '').replace(/^\+/, '')
-    : '';
-
-const sendWhatsAppText = async (to, text) => {
-  await axios.post(
-    CONFIG.WHATSAPP_API,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: text },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${CONFIG.ACCESS_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-};
-
-// ✅ Event handler
-app.post('/webhook', async (req, res) => {
-  try {
-    if (req.body.object !== 'whatsapp_business_account') {
-      return res.json({ status: 'IGNORED' });
-    }
-
-    for (const entry of req.body.entry || []) {
-      for (const change of entry.changes || []) {
-        for (const msg of change?.value?.messages || []) {
-          const from = normalize(msg.from);
-          const reply =
-            msg.text?.body ||
-            msg.button?.payload ||
-            msg.interactive?.button_reply?.id;
-
-          console.log(`📩 Incoming from ${from}:`, reply);
-
-          if (!reply) continue;
-          if (!allowedReplyNumbers.has(from)) {
-            console.log(`⛔ Auto-reply blocked for ${from}`);
-            continue;
-          }
-
-          rsvpResponses[from] = reply;
-
-          await sendWhatsAppText(
-            msg.from,
-            `✅ Thank you for your response: "${reply}". We’ll contact you shortly 😊`
-          );
-        }
-      }
-    }
-
-    res.json({ status: 'EVENT_RECEIVED' });
-  } catch (err) {
-    console.error('Webhook error:', err.message);
-    res.sendStatus(500);
-  }
-});
-///////////////////////Autoreply Watsup Messages //////////////////////////
-// In-memory store of numbers allowed for auto-reply
-
 app.use(bodyParser.json({ limit: '1mb' }));
 
-/////////////////////////// watsup OTP Authentication ///////////////
 app.use(bodyParser.json());
 
 const TOKEN_STORE = {};
 
-///////////////////////////// Send template message(pdf,image both send to watsup)/////////////////////
-//Configure Multer to store files in memory (essential for reading file.buffer)
-const upload = multer({ storage: multer.memoryStorage() }); 
+const normalizePhoneNumber = (num) =>
+  typeof num === 'string' ? num.replace(/\s/g, '').replace(/^\+/, '') : '';
+app.use(bodyParser.urlencoded({ extended: true }));
+/* ================= MULTER ================= */
+const upload = multer({storage: multer.memoryStorage(),limits: { fileSize: 25 * 1024 * 1024 }});
 
-// POST /api/upload-media: REWRITTEN UPLOAD LOGIC
-// ----------------------------------------------------------------------
-app.post('/api/upload-media', 
-    // Step 1: Diagnostic Middleware (Runs before Multer)
-    (req, res, next) => {
-        console.log("--- DEBUG: Pre-Multer Check ---");
-        console.log("Content-Type Header:", req.headers['content-type']); 
-        // We MUST see 'multipart/form-data; boundary=...' here.
-        next();
-    }, 
-    // Step 2: Multer File Handling
-    upload.single('file'), 
-    // Step 3: Main Route Handler
-       // --- In server.js, inside app.post('/api/upload-media', ...) ---
-
-async (req, res) => {
-    try {
-        const { phoneNumberId, accessToken, type } = req.body;
-        const file = req.file;
-
-        // ... (DEBUG checks here) ...
-
-        if (!file) {
-            return res.status(400).json({ error: 'No file uploaded.' });
-        }
-        if (!phoneNumberId || !accessToken) {
-             return res.status(400).json({ error: 'Missing configuration fields.' });
-        }
-
-        // 1. Determine the MIME type (Defensive rewrite)
-        let mimeType = file.mimetype; 
-        
-        if (!mimeType && typeof mime.lookup === 'function') {
-             // Use mime-types library if Multer didn't set it
-             mimeType = mime.lookup(file.originalname);
-        }
-        
-        // Final fallback if all else fails
-        if (!mimeType) {
-            mimeType = (type === 'document' ? 'application/pdf' : 'image/jpeg');
-        }
-
-
-        // 2. Prepare the request body for the WhatsApp API using form-data
-        const formData = new FormData();
-        formData.append('file', file.buffer, { filename: file.originalname, contentType: mimeType });
-        formData.append('messaging_product', 'whatsapp');
-        formData.append('type', mimeType); 
-
-        
-        // 3. Send the request to the WhatsApp Cloud API
-        const response = await axios.post(
-            `https://graph.facebook.com/v22.0/${phoneNumberId}/media`,
-            formData,
-            { 
-                headers: { 
-                    Authorization: `Bearer ${accessToken}`, 
-                    ...formData.getHeaders() 
-                },
-                maxContentLength: Infinity, 
-                maxBodyLength: Infinity,
-            }
-        );
-
-        res.json({ mediaId: response.data.id });
-
-    } catch (err) {
-        // This should now catch ANY error, even a ReferenceError during execution
-        console.error('FINAL Media Upload Error:', err.response?.data || err.message);
-        res.status(500).json({ 
-            error: 'Media upload failed at Graph API stage.', 
-            details: err.response?.data || { message: err.message }
-        });
-    }
-}
-);
-
-app.post('/api/send-message', async (req, res) => {
-    try {
-        const { 
-            phoneNumber, 
-            mediaId, 
-            mediaType, 
-            phoneNumberId, 
-            accessToken,
-            documentTemplateName,
-            imageTemplateName,
-            recipientName, 
-            invoiceNumber  
-        } = req.body;
-
-        const templateName = mediaType === 'document' ? documentTemplateName : imageTemplateName;
-        const componentType = mediaType === 'document' ? 'document' : 'image';
-        
-        // 1. Initialize Components array with the mandatory HEADER component
-        const components = [
-            // HEADER Component (for both Document and Image)
-            {
-                type: 'header',
-                parameters: [
-                    {
-                        type: componentType,
-                        [componentType]: { 
-                            id: mediaId,
-                            // Only include filename for documents
-                            ...(mediaType === 'document' && { filename: 'Media_File.pdf' }) 
-                        },
-                    },
-                ],
-            },
-        ];
-
-        // 2. 🛑 CONDITIONAL FIX: Add the BODY component ONLY for Documents
-        if (mediaType === 'document') {
-            components.push({
-                type: 'body',
-                parameters: [
-                    // Parameter 1: Recipient Name ({{1}})
-                    {
-                        type: 'text',
-                        text: recipientName || 'Customer', 
-                    },
-                    // Parameter 2: Invoice Number ({{2}})
-                    {
-                        type: 'text',
-                        text: invoiceNumber || 'INV-0001', 
-                    }
-                ],
-            });
-        }
-        
-        const data = {
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: phoneNumber,
-            type: 'template',
-            template: {
-                name: templateName,
-                language: { code: 'en' },
-                components: components, // Use the dynamically built array
-            },
-        };
-
-        const url = `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`;
-        const headers = {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-        };
-
-        const response = await axios.post(url, data, { headers });
-        res.json({ messageId: response.data.messages?.[0]?.id });
-
-    } catch (err) {
-        console.error('Message Send Error:', err.response?.data || err.message);
-        res.status(500).json({ 
-            error: 'Message sending failed at Graph API stage.', 
-            details: err.response?.data || { message: err.message } 
-        });
-    }
-});
-///////////////////////////////////Autoreply///////////////////////////////////
-// Webhook Event Handler: Receives incoming messages and other events from WhatsApp///////////
-/* ================= CREATE TEMPLATE ================= */
-/* ================= UTIL ================= */
-function parseTemplate(text) {
-  const variables = [];
-  let index = 1;
-
-  const parsedText = text.replace(/{(.*?)}/g, (_, v) => {
-    variables.push(v);
-    return `{{${index++}}}`;
-  });
-
-  return { parsedText, variables };
-}
-const allowedReplyMap = new Map();
-/* ================= CREATE TEMPLATE ================= */
-app.post("/api/create-template04", async (req, res) => {
+app.post('/api/upload-media', upload.single('file'), async (req, res) => {
   try {
-    const { accessToken, wabaId, templateName, components } = req.body;
-    if (!accessToken || !wabaId || !templateName || !components) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
+    const { phoneNumberId, accessToken } = req.body;
+    const file = req.file;
 
-    const bodyComponent = components.find(c => c.type === "BODY");
-    if (!bodyComponent || !bodyComponent.text) {
-      return res.status(400).json({ error: "Missing BODY text in components" });
-    }
+    if (!file) return res.status(400).json({ error: 'No file uploaded.' });
+    if (!phoneNumberId || !accessToken) return res.status(400).json({ error: 'Missing configuration fields.' });
 
-    const { parsedText, variables } = parseTemplate(bodyComponent.text);
-
-    const examples = variables.length
-      ? variables.map(v => {
-          if (v === "name") return "John";
-          if (v === "message") return "I am interested";
-          return "Sample";
-        })
-      : [bodyComponent.text]; // fallback for static text
-
-    const payload = {
-      name: templateName,
-      language: "en_US",
-      category: "UTILITY",
-      components: [
-        {
-          type: "BODY",
-          text: parsedText
-        }
-      ]
-    };
+    const formData = new FormData();
+    formData.append('file', file.buffer, { filename: file.originalname, contentType: file.mimetype });
+    formData.append('messaging_product', 'whatsapp');
 
     const response = await axios.post(
-      `https://graph.facebook.com/v22.0/${wabaId}/message_templates`,
+      `https://graph.facebook.com/v22.0/${phoneNumberId}/media`,
+      formData,
+      { headers: { Authorization: `Bearer ${accessToken}`, ...formData.getHeaders() } }
+    );
+
+    res.json({ mediaId: response.data.id });
+
+  } catch (err) {
+    console.error('Media Upload Error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Media upload failed', details: err.response?.data || err.message });
+  }
+});
+
+
+///////////////////////// 01.Fetch Templates List  from Meta//////////////////////
+// 👉 API to fetch WhatsApp templates
+app.post("/api/templates", async (req, res) => {
+  const { wabaId, accessToken } = req.body;
+
+  if (!wabaId || !accessToken) {
+    return res.status(400).json({ error: "WABA ID and Access Token required" });
+  }
+
+  try {
+    const response = await axios.get(
+      `https://graph.facebook.com/v23.0/${wabaId}/message_templates`,
+      {
+        params: { fields: "name,status" },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+    const templates = response.data.data.map(t => ({
+      name: t.name,
+      status: t.status,
+    }));
+
+    res.json({ templates });
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to fetch templates" });
+  }
+});
+
+///////////////////////// 02. watsup text message sender ////////////////////
+/* ---------------- SEND TEXT MESSAGE ---------------- */
+
+app.post("/api/send-text", async (req, res) => {
+  const {
+    phoneNumberId,
+    accessToken,
+    phoneNumber,
+    messageBody,
+    previewUrl,
+  } = req.body;
+
+  // ✅ Validation
+  if (!phoneNumberId || !accessToken || !phoneNumber || !messageBody) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing required fields",
+    });
+  }
+
+  try {
+    const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
+
+    const payload = {
+      messaging_product: "whatsapp",
+      to: phoneNumber,
+      type: "text",
+      text: {
+        body: messageBody,
+        preview_url: previewUrl || false,
+      },
+    };
+
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    return res.json({
+      success: true,
+      messageId: response.data.messages?.[0]?.id,
+    });
+  } catch (error) {
+    console.error("WhatsApp API Error:", error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error:
+        error.response?.data?.error?.message ||
+        "Failed to send WhatsApp message",
+    });
+  }
+});
+
+
+//---------------- 03. Send WhatsApp Location ----------------
+app.post("/api/send-location", async (req, res) => {
+  try {
+    const {
+      phoneNumber,
+      locationData,
+      accessToken,
+      phoneNumberId,
+    } = req.body;
+
+    // ---------- Validation ----------
+    if (!phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "phoneNumber is required",
+      });
+    }
+
+    if (!accessToken) {
+      return res.status(400).json({
+        success: false,
+        message: "accessToken is required",
+      });
+    }
+
+    if (!phoneNumberId) {
+      return res.status(400).json({
+        success: false,
+        message: "phoneNumberId is required",
+      });
+    }
+
+    if (!locationData) {
+      return res.status(400).json({
+        success: false,
+        message: "locationData is required",
+      });
+    }
+
+    const { latitude, longitude, name, address } = locationData;
+
+    if (!latitude || !longitude) {
+      return res.status(400).json({
+        success: false,
+        message: "latitude and longitude are required",
+      });
+    }
+
+    // ---------- WhatsApp Location Payload ----------
+    const payload = {
+      messaging_product: "whatsapp",
+      to: phoneNumber,
+      type: "location",
+      location: {
+        latitude: Number(latitude),
+        longitude: Number(longitude),
+        name: name || "Shared Location",
+        address: address || "",
+      },
+    };
+
+    // ---------- Send to WhatsApp ----------
+    const response = await axios.post(
+      `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    // ---------- Success ----------
+    return res.json({
+      success: true,
+      message: `✅ Location sent to ${phoneNumber}`,
+      whatsappMessageId: response.data?.messages?.[0]?.id || null,
+    });
+  } catch (error) {
+    console.error("❌ WhatsApp API Error:", error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error.response?.data?.error?.message ||
+        "Failed to send WhatsApp location",
+    });
+  }
+});
+
+/////////////////////////////// 04.Media id creation and sending Template messages///////
+
+app.post("/api/create-template01", async (req, res) => {
+  try {
+    const {
+      template_name,
+      header_format,    // "image", "document", "audio", "video"
+      h,                // MEDIA HANDLE from upload API
+      placeholders,     // ["Fouzia", "INV-123"]
+      wabaId,
+      accessToken
+    } = req.body;
+
+    /* ================= VALIDATION ================= */
+    if (!template_name)
+      return res.status(400).json({ error: "template_name missing" });
+
+    if (!header_format)
+      return res.status(400).json({ error: "header_format missing" });
+
+    if (!h)
+      return res.status(400).json({ error: "media handle (h) missing" });
+
+    if (!wabaId)
+      return res.status(400).json({ error: "wabaId missing" });
+
+    if (!accessToken)
+      return res.status(400).json({ error: "accessToken missing" });
+
+    if (!Array.isArray(placeholders) || placeholders.length === 0)
+      return res.status(400).json({ error: "placeholders missing or invalid" });
+
+    /* ================= TEMPLATE TEXT ================= */
+    const bodyText =
+      "Hello {{1}}, your invoice number is {{2}}. Please check the attached PDF.";
+
+    const footerText = "Hello its from Calibruce";
+
+    /* ================= COMPONENTS ================= */
+    const components = [
+      {
+        type: "HEADER",
+        format: header_format.toUpperCase(), // IMAGE | DOCUMENT
+        example: {
+          header_handle: [h]
+        }
+      },
+      {
+        type: "BODY",
+        text: bodyText,
+        example: {
+          body_text: [placeholders] // Meta requires array of arrays
+        }
+      },
+      {
+        type: "FOOTER",
+        text: footerText
+      }
+    ];
+
+    const payload = {
+      name: template_name,
+      language: "en_US",
+      category: "UTILITY",
+      components
+    };
+
+    /* ================= META API CALL ================= */
+    const response = await axios.post(
+      `https://graph.facebook.com/v20.0/${wabaId}/message_templates`,
       payload,
       {
         headers: {
@@ -565,160 +528,75 @@ app.post("/api/create-template04", async (req, res) => {
       }
     );
 
-    res.json({ success: true, parsedText, variables, examples, apiResponse: response.data });
+    return res.json({
+      success: true,
+      template: response.data
+    });
 
   } catch (err) {
-    console.error("WhatsApp API ERROR:", JSON.stringify(err.response?.data, null, 2));
-    res.status(500).json({ error: err.response?.data || err.message });
+    console.error("Template creation error:", err.response?.data || err.message);
+    return res.status(500).json({
+      error: err.response?.data || "Failed to create template"
+    });
   }
 });
 
-
-/* ================= SEND TEMPLATE ================= */
-app.post('/api/send-messages01', async (req, res) => {
+app.post("/api/send-template01", async (req, res) => {
   try {
-    const {phoneNumbers, autoReplyMessage,accessToken ,templateName,phoneNumberId} = req.body;
+    const {
+      phoneNumbers,
+      templateName,
+      templateType, // "image" or "document"
+      phoneNumberId,
+      accessToken,
+      placeholders = [], // array of placeholder values
+    } = req.body;
 
-    if (!phoneNumbers || phoneNumbers.length === 0 || !autoReplyMessage) {
-      return res.status(400).json({
-        success: false,
-        error: 'message, phoneNumbers, and autoReplyMessage are required'
-      });
+    if (!Array.isArray(placeholders) || placeholders.length === 0) {
+      return res.status(400).json({ error: "Placeholders are required" });
     }
-      // 2️⃣ Update allowedReplyMap with all numbers from frontend
-  phoneNumbers.forEach((num) => {
-    const normalized = normalizePhoneNumber(num);
-    console.log('Adding to allowedReplyMap:', normalized);
-    allowedReplyMap.set(normalized, { message: autoReplyMessage, templateName });
-  });
 
-    const results = [];
-
-    for (const number of phoneNumbers) {
-      const normalizedNumber = normalizePhoneNumber(number);
-      if (!normalizedNumber) continue;
-
-      try {
-        await axios.post(
-          `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
+    for (const to of phoneNumbers) {
+      const templatePayload = {
+        name: templateName,
+        language: { code: "en_US" },
+        components: [
           {
-            messaging_product: 'whatsapp',
-            to: normalizedNumber,
-            type: 'text',
-            text: { body:autoReplyMessage }
+            type: "body",
+            parameters: placeholders.map((p) => ({ type: "text", text: p })),
           },
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
+        ],
+      };
 
-        // ✅ STORE AUTO-REPLY MESSAGE FOR THIS NUMBER
-       allowedReplyMap.set(normalizedNumber, { message: autoReplyMessage, templateName:templateName });
+      // For document or image templates, WhatsApp API requires same body placeholders
+      const payload = {
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: templatePayload,
+      };
 
-
-        results.push({ number: normalizedNumber, success: true });
-      } catch (err) {
-        results.push({
-          number: normalizedNumber,
-          success: false,
-          error: err.response?.data?.error?.message
-        });
-      }
-    }
-
-    console.log('Updated auto-reply map:', [...allowedReplyMap.entries()]);
-
-    res.json({ success: true, results });
-
-  } catch (error) {
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-
-// Map of phone numbers to auto-reply messages
-const allowedReplyMap2 = new Map();
-
-const normalizePhoneNumber = (num) =>
-  typeof num === 'string' ? num.replace(/\s/g, '').replace(/^\+/, '') : '';
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// Webhook endpoint
-app.post('/webhook', async (req, res) => {
-  try {
-    // Only handle WhatsApp events
-    if (req.body.object !== 'whatsapp_business_account') {
-      return res.sendStatus(200);
-    }
-
-    const entries = req.body.entry || [];
-
-    for (const entry of entries) {
-      const changes = entry.changes || [];
-
-      for (const change of changes) {
-        if (change.field !== 'messages') continue;
-
-        const phoneNumberId = change.value.metadata.phone_number_id; // ✅ correct
-        const messages = change.value.messages || [];
-
-        for (const msg of messages) {
-          const from = normalizePhoneNumber(msg.from);
-          const receivedText = msg.text?.body;
-          if (!receivedText) continue;
-
-          console.log(`Incoming message from ${from}: ${receivedText}`);
-
-          // Get auto-reply message from your map
-          const replyMessage = allowedReplyMap2.get(from);
-          if (!replyMessage) {
-            console.log(`No auto-reply configured for ${from}`);
-            continue;
-          }
-
-          try {
-            await axios.post(
-              `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
-              {
-                messaging_product: 'whatsapp',
-                to: from,
-                type: 'text',
-                text: { body: replyMessage },
-              },
-              {
-                headers: {
-                  Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-                  'Content-Type': 'application/json',
-                },
-              }
-            );
-
-            console.log(`Auto-reply sent to ${from}`);
-          } catch (sendError) {
-            console.error(`Failed to send message to ${from}:`, sendError.response?.data || sendError.message);
-          }
+      await axios.post(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+        payload,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
         }
-      }
+      );
     }
 
-    res.sendStatus(200); // ✅ respond quickly
+    res.json({ success: true });
   } catch (err) {
-    console.error('Webhook processing error:', err);
-    res.sendStatus(500);
+    console.error(err.response?.data || err);
+    res.status(500).json({ error: "Failed to send messages" });
   }
 });
 
-
-
-
-
-//////////////////////////////////// orderconformation Template///////////////////
-// ------------------------
-// Create WhatsApp Template
-// ------------------------
+////////////////////////////////////05.orderconformation Template///////////////////
+                  //Create WhatsApp Template
 app.post("/api/create-template03", async (req, res) => {
   try {
     const {
@@ -825,10 +703,7 @@ app.post("/api/create-template03", async (req, res) => {
     });
   }
 });
-
-
-// ------------------------
-// Send Approved Template
+                // Send Approved Template
 app.post("/api/send-template03", async (req, res) => {
   try {
     const {
@@ -837,19 +712,74 @@ app.post("/api/send-template03", async (req, res) => {
       phoneNumberId,
       accessToken,
       placeholders,
-      documentHandle
+      documentHandle,
+      mediaType
     } = req.body;
 
-    // Validation
-    if (!phoneNumbers?.length || !templateName || !phoneNumberId || !accessToken) {
-      return res.status(400).json({ error: "Missing required fields" });
+    // ---------- VALIDATION ----------
+    if (!Array.isArray(phoneNumbers) || phoneNumbers.length === 0) {
+      return res.status(400).json({ error: "Phone numbers are required" });
     }
 
+    if (!templateName?.trim()) {
+      return res.status(400).json({ error: "Template name is required" });
+    }
+
+    if (!phoneNumberId?.trim()) {
+      return res.status(400).json({ error: "Phone Number ID is required" });
+    }
+
+    if (!accessToken?.trim()) {
+      return res.status(400).json({ error: "Access Token is required" });
+    }
+
+    if (documentHandle ?.trim()) {
+      return res.status(400).json({ error: "Invalid media handle" });
+    }
+
+    // ---------- PREPARE TEMPLATE COMPONENTS ----------
+    const buildComponents = () => {
+      const components = [];
+
+      // BODY placeholders
+      if (placeholders.length > 0) {
+        components.push({
+          type: "body",
+          parameters: placeholders.map(text => ({
+            type: "text",
+            text
+          }))
+        });
+      }
+
+      // HEADER media (optional)
+      if (documentHandle && mediaType) {
+        const mediaCategory = mediaType.startsWith("image")
+          ? "image"
+          : mediaType.startsWith("video")
+          ? "video"
+          : "document";
+
+        components.push({
+          type: "header",
+          parameters: [
+            {
+              type: mediaCategory,
+              [mediaCategory]: { id: documentHandle }
+            }
+          ]
+        });
+      }
+
+      return components;
+    };
+
+    // ---------- SEND LOOP ----------
     const results = [];
+    let sentCount = 0;
 
     for (const number of phoneNumbers) {
       try {
-        // Call WhatsApp API
         const response = await axios.post(
           `https://graph.facebook.com/v16.0/${phoneNumberId}/messages`,
           {
@@ -859,393 +789,51 @@ app.post("/api/send-template03", async (req, res) => {
             template: {
               name: templateName,
               language: { code: "en_US" },
-              components: [
-                {
-                  type: "body",
-                  parameters: placeholders.map(p => ({ type: "text", text: p }))
-                },
-                documentHandle
-                  ? {
-                      type: "header",
-                      parameters: [{ type: "document", document: { id: documentHandle } }]
-                    }
-                  : undefined
-              ].filter(Boolean)
+              components: buildComponents()
             }
           },
           {
-            headers: { Authorization: `Bearer ${accessToken}` }
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
           }
         );
-        results.push({ number, status: "sent", response: response.data });
+
+        sentCount++;
+        results.push({
+          number,
+          status: "sent",
+          messageId: response.data.messages?.[0]?.id
+        });
+
       } catch (err) {
-        console.error(`Failed to send to ${number}:`, err.response?.data || err.message);
-        results.push({ number, status: "failed", error: err.response?.data || err.message });
+        console.error(`❌ Failed for ${number}:`, err.response?.data || err.message);
+
+        results.push({
+          number,
+          status: "failed",
+          error: err.response?.data || err.message
+        });
       }
     }
 
-    res.json({ success: true, results });
+    // ---------- FINAL RESPONSE ----------
+    res.json({
+      success: true,
+      sent_count: sentCount,
+      total: phoneNumbers.length,
+      results
+    });
+
   } catch (err) {
-    console.error("Error in /api/send-template03:", err);
+    console.error("🔥 /api/send-template03 error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-//////////////////// watsup OTP verification ///////////////////////
-// Generate formula-based OTP
-// Formula-based OTP generator
-function generateOTP(phoneNumber) {
-  const secret = 'MY_SECRET_KEY';
-  const timestamp = Math.floor(Date.now() / 1000 / 60); // changes every minute
-  const hash = crypto.createHmac('sha256', secret).update(phoneNumber + timestamp).digest('hex');
-  const otp = parseInt(hash.substring(0, 6), 16) % 1000000;
-  return otp.toString().padStart(6, '0');
-}
-
-// Sanitize template name (Meta requirement)
-function sanitizeTemplateName(name) {
-  return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 30);
-}
-
-// Step 1: Create template
-app.post("/create-template02", async (req, res) => {
-  const { wabaId, accessToken, templateName } = req.body;
-
-  if (!wabaId || !accessToken || !templateName) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  const payload = {
-    name: templateName.toLowerCase().replace(/\s+/g, "_"),
-    language: "en_US",
-    category: "AUTHENTICATION",
-    components: [
-      {
-      type: "BODY",
-      add_security_recommendation: true
-    },
-      {
-        type: "BUTTONS",
-        buttons: [
-        {
-          type: "OTP",
-           otp_type: "COPY_CODE"
-        }
-      ]
-      }
-    ]
-  };
-
-  try {
-    const response = await axios.post(
-      `https://graph.facebook.com/v17.0/${wabaId}/message_templates`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    res.json(response.data);
-  } catch (error) {
-    console.error(error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data || error.message });
-  }
-});
-
-
-
-// Step 2: Send OTP
-app.post('/send-otp', async (req, res) => {
-  try {
-    const { phoneNumber, wabaId, accessToken, templateName } = req.body;
-    if (!phoneNumber || !wabaId || !accessToken || !templateName)
-      return res.status(400).json({ error: 'All fields are required' });
-
-    const otp = generateOTP(phoneNumber);
-
-    await axios.post(
-      `https://graph.facebook.com/v22.0/${wabaId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: phoneNumber,
-        type: 'template',
-        template: {
-          name: templateName,
-          language: { code: 'en' },
-          components: [{ type: 'body', parameters: [{ type: 'text', text: otp }] }],
-        },
-      },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
-    );
-
-    res.json({ success: true, message: 'OTP sent successfully' });
-  } catch (err) {
-    console.error(err.response?.data || err);
-    res.status(500).json({ error: err.response?.data || 'Failed to send OTP' });
-  }
-});
-
-// Step 3: Verify OTP
-app.post('/verify-otp', (req, res) => {
-  const { phoneNumber, userOtp } = req.body;
-  if (!phoneNumber || !userOtp) return res.status(400).json({ error: 'Phone and OTP required' });
-
-  const expectedOtp = generateOTP(phoneNumber);
-  if (userOtp === expectedOtp) {
-    return res.json({ success: true, message: 'OTP verified ✅' });
-  } else {
-    return res.status(400).json({ success: false, message: 'Invalid OTP ❌' });
-  }
-});
-
-
-//---------------- Send WhatsApp Location ----------------
-app.post("/api/send-location", async (req, res) => {
-  try {
-    const {
-      phoneNumber,
-      locationData,
-      accessToken,
-      phoneNumberId,
-    } = req.body;
-
-    // ---------- Validation ----------
-    if (!phoneNumber) {
-      return res.status(400).json({
-        success: false,
-        message: "phoneNumber is required",
-      });
-    }
-
-    if (!accessToken) {
-      return res.status(400).json({
-        success: false,
-        message: "accessToken is required",
-      });
-    }
-
-    if (!phoneNumberId) {
-      return res.status(400).json({
-        success: false,
-        message: "phoneNumberId is required",
-      });
-    }
-
-    if (!locationData) {
-      return res.status(400).json({
-        success: false,
-        message: "locationData is required",
-      });
-    }
-
-    const { latitude, longitude, name, address } = locationData;
-
-    if (!latitude || !longitude) {
-      return res.status(400).json({
-        success: false,
-        message: "latitude and longitude are required",
-      });
-    }
-
-    // ---------- WhatsApp Location Payload ----------
-    const payload = {
-      messaging_product: "whatsapp",
-      to: phoneNumber,
-      type: "location",
-      location: {
-        latitude: Number(latitude),
-        longitude: Number(longitude),
-        name: name || "Shared Location",
-        address: address || "",
-      },
-    };
-
-    // ---------- Send to WhatsApp ----------
-    const response = await axios.post(
-      `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    // ---------- Success ----------
-    return res.json({
-      success: true,
-      message: `✅ Location sent to ${phoneNumber}`,
-      whatsappMessageId: response.data?.messages?.[0]?.id || null,
-    });
-  } catch (error) {
-    console.error("❌ WhatsApp API Error:", error.response?.data || error.message);
-
-    return res.status(500).json({
-      success: false,
-      message:
-        error.response?.data?.error?.message ||
-        "Failed to send WhatsApp location",
-    });
-  }
-});
-/////////////////// pdf and image creation dynamic Template ///////////
-/* ---------------- CREATE TEMPLATE with Header (Media) Body (Dynamic) Footer ---------------- */
-app.post("/api/create-template01", async (req, res) => {
-  try {
-    const {
-      template_name,
-      header_format,    // "image", "document", "audio", "video"
-      h,                // MEDIA HANDLE from upload API
-      placeholders,     // ["Fouzia", "INV-123"]
-      wabaId,
-      accessToken
-    } = req.body;
-
-    /* ================= VALIDATION ================= */
-    if (!template_name)
-      return res.status(400).json({ error: "template_name missing" });
-
-    if (!header_format)
-      return res.status(400).json({ error: "header_format missing" });
-
-    if (!h)
-      return res.status(400).json({ error: "media handle (h) missing" });
-
-    if (!wabaId)
-      return res.status(400).json({ error: "wabaId missing" });
-
-    if (!accessToken)
-      return res.status(400).json({ error: "accessToken missing" });
-
-    if (!Array.isArray(placeholders) || placeholders.length === 0)
-      return res.status(400).json({ error: "placeholders missing or invalid" });
-
-    /* ================= TEMPLATE TEXT ================= */
-    const bodyText =
-      "Hello {{1}}, your invoice number is {{2}}. Please check the attached PDF.";
-
-    const footerText = "Hello its from Calibruce";
-
-    /* ================= COMPONENTS ================= */
-    const components = [
-      {
-        type: "HEADER",
-        format: header_format.toUpperCase(), // IMAGE | DOCUMENT
-        example: {
-          header_handle: [h]
-        }
-      },
-      {
-        type: "BODY",
-        text: bodyText,
-        example: {
-          body_text: [placeholders] // Meta requires array of arrays
-        }
-      },
-      {
-        type: "FOOTER",
-        text: footerText
-      }
-    ];
-
-    const payload = {
-      name: template_name,
-      language: "en_US",
-      category: "UTILITY",
-      components
-    };
-
-    /* ================= META API CALL ================= */
-    const response = await axios.post(
-      `https://graph.facebook.com/v20.0/${wabaId}/message_templates`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    return res.json({
-      success: true,
-      template: response.data
-    });
-
-  } catch (err) {
-    console.error("Template creation error:", err.response?.data || err.message);
-    return res.status(500).json({
-      error: err.response?.data || "Failed to create template"
-    });
-  }
-});
-
-
-app.post("/api/send-template01", async (req, res) => {
-  try {
-    const {
-      phoneNumbers,
-      templateName,
-      templateType, // "image" or "document"
-      phoneNumberId,
-      accessToken,
-      placeholders = [], // array of placeholder values
-    } = req.body;
-
-    if (!Array.isArray(placeholders) || placeholders.length === 0) {
-      return res.status(400).json({ error: "Placeholders are required" });
-    }
-
-    for (const to of phoneNumbers) {
-      const templatePayload = {
-        name: templateName,
-        language: { code: "en_US" },
-        components: [
-          {
-            type: "body",
-            parameters: placeholders.map((p) => ({ type: "text", text: p })),
-          },
-        ],
-      };
-
-      // For document or image templates, WhatsApp API requires same body placeholders
-      const payload = {
-        messaging_product: "whatsapp",
-        to,
-        type: "template",
-        template: templatePayload,
-      };
-
-      await axios.post(
-        `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-        payload,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err.response?.data || err);
-    res.status(500).json({ error: "Failed to send messages" });
-  }
-});
-
-
-
-
-
-// =======================================================
-// 7. SEND WHATSAPP   marriage invitation MESSAGES 
-// =======================================================
+///////////////////06 & 07 watsup Wedding invitation and autoreply////////////////////////
+// = WHATSAPP   marriage invitation MESSAGES // =======================================================
 // --------------------
 // In-memory stores
 // --------------------
@@ -1260,48 +848,74 @@ app.use(bodyParser.urlencoded({ extended: true }));
 let allowedReplyNumbers = new Set();
 let rsvpResponses = {};
 
-
 //// =======================
-// Create Dynamic Template
+// Create Dynamic Marriage Template
 // =======================
 app.post("/api/create-template", async (req, res) => {
   try {
     const {
       template_name,
-      h,                 // media handle
-      num_placeholders,  // number of dynamic fields
+      header_media_id, // renamed for clarity
       wabaId,
       accessToken,
-      placeholders       // array of dynamic texts from frontend, e.g., ["John", "Jane", "25 Dec 2025", "Beach Resort"]
+      placeholders
     } = req.body;
 
-    if (!template_name || !h || !wabaId || !accessToken || !placeholders) {
+    if (
+      !template_name ||
+      !header_media_id ||
+      !wabaId ||
+      !accessToken ||
+      !Array.isArray(placeholders)
+    ) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    if (placeholders.length !== num_placeholders) {
-      return res
-        .status(400)
-        .json({ error: `Number of placeholders should be ${num_placeholders}` });
-    }
+    const bodyText = `🌸 You're Invited! 🌸
 
-    // Construct the body text dynamically with placeholders {{1}}, {{2}}, etc.
-    const bodyText = `We are delighted to invite you to celebrate the wedding of {{1}} and {{2}}, which will take place on {{3}} at {{4}}. We hope to see you there!`;
+Join us in celebrating the sacred union of
+👰 {{1}} & 🤵 {{2}}
+
+📅 Date: {{3}}
+📍 Venue: {{4}}
+
+Your presence will make our day complete! 💍✨`;
 
     const payload = {
       name: template_name,
       language: "en_US",
-      category: "MARKETING",
+      category: "MARKETING", // ✅ safer for invitations
       components: [
         {
           type: "HEADER",
           format: "IMAGE",
-          example: { header_handle: [h] }
+          example: {
+            header_handle: [header_media_id]
+          }
         },
         {
           type: "BODY",
           text: bodyText,
-          example: { body_text: [placeholders] } // <-- send dynamic values here
+          example: {
+            body_text: [placeholders]
+          }
+        },
+        {
+          type: "BUTTONS",
+          buttons: [
+            {
+              type: "QUICK_REPLY",
+              text: "Yes, I'll attend"
+            },
+            {
+              type: "QUICK_REPLY",
+              text: "No, can't make it"
+            },
+            {
+              type: "QUICK_REPLY",
+              text: "Will confirm later"
+            }
+          ]
         }
       ]
     };
@@ -1319,51 +933,12 @@ app.post("/api/create-template", async (req, res) => {
 
     res.json(response.data);
   } catch (err) {
-    console.error(err.response?.data || err);
-    res.status(500).json({ error: err.response?.data || "Failed" });
+    console.error("Template creation failed:", err.response?.data || err);
+    res.status(500).json({
+      error: err.response?.data || "Failed to create template"
+    });
   }
 });
-
-
-// =======================
-// Send Template Messages
-// =======================
-
-const GRAPH_API = "https://graph.facebook.com/v22.0";
-
-/* ---------------------------------------------------
-   1️⃣ Upload Media → Get MEDIA ID from WhatsApp
---------------------------------------------------- */
-const upload3 = multer({ dest: "uploads/" });
-
-app.post("/api/upload-media", upload3.single("file"), async (req, res) => {
-  try {
-    const { phoneNumberId, accessToken } = req.body;
-    if (!req.file || !phoneNumberId || !accessToken) {
-      return res.status(400).json({ error: "Missing file or credentials" });
-    }
-
-    const formData = new FormData();
-    formData.append("messaging_product", "whatsapp");
-    formData.append("file", fs.createReadStream(req.file.path));
-    formData.append("type", req.file.mimetype);
-
-    const response = await axios.post(
-      `https://graph.facebook.com/v20.0/${phoneNumberId}/media`,
-      formData,
-      { headers: { Authorization: `Bearer ${accessToken}`, ...formData.getHeaders() } }
-    );
-
-    fs.unlinkSync(req.file.path);
-
-    res.json({ mediaId: response.data.id });
-  } catch (err) {
-    console.error(err.response?.data || err);
-    res.status(500).json({ error: err.response?.data || err.message });
-  }
-});
-
-
 /* ---------------------------------------------------
    2️⃣ Send WhatsApp Template marriage
 --------------------------------------------------- */
@@ -1476,111 +1051,271 @@ app.post("/api/send-invitation", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+/* =====================================================
+   API: CREATE TEXT TEMPLATE for Autoreply
+===================================================== */
+app.post('/api/create-text-template', async (req, res) => {
+  try {
+    const { template_name, category, bodyText, wabaId, accessToken } = req.body;
 
-
-
-// Webhook Event Handler (POST request)
-// Meta sends POST requests to this endpoint for incoming messages and other events.
-app.post('/webhook', async (req, res) => {
-    console.log('Webhook event received. Processing...');
-    try {
-        if (req.body.object === 'whatsapp_business_account' && req.body.entry && req.body.entry.length > 0) {
-            for (const entry of req.body.entry) {
-                for (const change of entry.changes) {
-                    if (change.field === 'messages' && change.value.messages && change.value.messages.length > 0) {
-                        for (const message of change.value.messages) {
-                            const rawFrom = message.from; // The sender's raw phone number
-                            const from = normalizePhoneNumber(rawFrom); // Normalized sender number
-                            const receivedMessageBody = message.text?.body; // Text message content
-
-                            // Correctly extract payload and title for 'button' type messages
-                            const interactiveReplyPayload = message.button?.payload; // For button clicks
-                            const interactiveReplyTitle = message.button?.text;     // For button clicks
-
-                            console.log(`[Webhook] Raw 'from': ${rawFrom}, Normalized: ${from}`);
-                            console.log(`[Webhook] Body: "${receivedMessageBody || 'N/A'}", Payload: "${interactiveReplyPayload || 'N/A'}", Title: "${interactiveReplyTitle || 'N/A'}"`);
-                            console.log(`[Webhook] Allowed numbers:`, Array.from(allowedReplyNumbers));
-
-                            let autoReplySent = false;
-
-                            // Handle Quick Reply Button Clicks (e.g., RSVP responses)
-                            if (interactiveReplyPayload && allowedReplyNumbers.has(from)) {
-                                console.log(`[Webhook] Received interactive reply from ${from}: ${interactiveReplyTitle} (Payload: ${interactiveReplyPayload})`);
-                                rsvpResponses[from] = interactiveReplyPayload; // Store the RSVP response
-                                console.log(`[Webhook] Stored RSVP for ${from}: ${interactiveReplyPayload}`);
-
-                                let replyMessage;
-                                // These payloads MUST match what you configured in Meta for your quick reply buttons.
-                                switch (interactiveReplyPayload) {
-                                    case 'Yes': // FIX: Changed payload to match the exact string from logs (assuming 'Yes' for consistency)
-                                        replyMessage = `Wonderful! Thank you for confirming you'll attend. We look forward to celebrating with you! 🎉`;
-                                        break;
-                                    case 'No': // FIX: Changed payload to match the exact string from logs
-                                        replyMessage = `We're sorry to hear you can't make it, but thank you for letting us know.`;
-                                        break;
-                                    case 'Will-Confirm-Later': // Confirmed from previous logs
-                                        replyMessage = `Thank you for your response. Please let us know if your plans change.`;
-                                        break;
-                                    default:
-                                        console.warn(`[Webhook] Unrecognized payload in switch: "${interactiveReplyPayload}" from ${from}`);
-                                        replyMessage = `Thank you for your response: "${interactiveReplyTitle}". Our team will get back to you soon! 😊`;
-                                }
-
-                                // Send the auto-reply message back to the user
-                                await axios.post(
-                                    `https://graph.facebook.com/v22.0/${CONFIG.PHONE_NUMBER_ID}/messages`,
-                                    {
-                                        messaging_product: 'whatsapp',
-                                        to: rawFrom, // Send back to the original sender
-                                        type: 'text',
-                                        text: { body: replyMessage }
-                                    },
-                                    {
-                                        headers: {
-                                            'Authorization': `Bearer ${CONFIG.ACCESS_TOKEN}`,
-                                            'Content-Type': 'application/json'
-                                        }
-                                    }
-                                );
-                                console.log(`Auto-reply sent to ${rawFrom} for interactive response.`);
-                                autoReplySent = true;
-                            }
-                            // Handle regular text messages (if the number is in allowedReplyNumbers and no auto-reply was sent yet)
-                            else if (receivedMessageBody && allowedReplyNumbers.has(from) && !autoReplySent) {
-                                console.log(`[Webhook] Number ${from} FOUND in allowedReplyNumbers (text message). Sending generic auto-reply.`);
-                                const replyMessage = `Thank you for your response: "${receivedMessageBody}". Our team will get back to you soon! 😊`;
-                                await axios.post(
-                                    `https://graph.facebook.com/v22.0/${CONFIG.PHONE_NUMBER_ID}/messages`,
-                                    {
-                                        messaging_product: 'whatsapp',
-                                        to: rawFrom,
-                                        type: 'text',
-                                        text: { body: replyMessage }
-                                    },
-                                    { headers: { 'Authorization': `Bearer ${CONFIG.ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
-                                );
-                            } else if (!autoReplySent) {
-                                console.log(`[Webhook] No auto-reply for ${from}. Reason: Not found in allowedReplyNumbers or not a relevant message type.`);
-                            }
-                        }
-                    } else {
-                        console.log('Received non-message webhook event or unsupported change field:', JSON.stringify(change, null, 2));
-                    }
-                }
-            }
-            // Acknowledge the event receipt to Meta
-            return res.status(200).json({ status: 'EVENT_RECEIVED', message: 'Webhook event processed.' });
-        }
-        console.log('Received unknown or non-WhatsApp webhook event:', JSON.stringify(req.body, null, 2));
-        return res.status(200).json({ status: 'IGNORED', message: 'Unknown or non-WhatsApp event.' });
-    } catch (error) {
-        console.error('Error processing webhook event:', error.response?.data || error.message);
-        return res.status(500).json({ success: false, error: 'Failed to process webhook event.' });
+    if (!template_name || !category || !bodyText || !wabaId || !accessToken) {
+      return res.status(400).json({ error: 'Missing fields' });
     }
+
+    const payload = {
+      name: template_name.toLowerCase(),   // ✅ REQUIRED
+      language: 'en_US',                   // ✅ CORRECT FORMAT
+      category,                            // UTILITY / MARKETING / AUTHENTICATION
+      components: [
+        {
+          type: 'BODY',
+          text: bodyText                   // ✅ STATIC AUTO-REPLY TEXT
+        }
+      ]
+    };
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v22.0/${wabaId}/message_templates`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      status: response.data.status || 'PENDING',
+      data: response.data
+    });
+
+  } catch (err) {
+    console.error('❌ Template creation error:', err.response?.data || err.message);
+    res.status(500).json({
+      error: err.response?.data || err.message
+    });
+  }
+});
+/* =====================================================
+   API: SEND TEMPLATE MESSAGES for Autoreply
+===================================================== */
+
+app.post('/api/send-template-messages', async (req, res) => {
+  try {
+    const { templateName, phoneNumbers, accessToken, phoneNumberId } = req.body;
+
+    if (!templateName || !phoneNumbers?.length) {
+      return res.status(400).json({ error: 'Missing data' });
+    }
+      const normalized = num.replace(/\D/g, '');
+        // ✅ STORE TEMPLATE FOR WEBHOOK USE
+      phoneTemplateMap.set(normalized, templateName);
+    const results = [];
+
+    for (const num of phoneNumbers) {
+      try {
+        const payload = {
+          messaging_product: 'whatsapp',
+          to: normalized,
+          type: 'template',
+          template: {
+            name: templateName,
+            language: { code: 'en_US' }
+            // ❌ NO components
+          }
+        };
+
+        const resp = await axios.post(
+          `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+          payload,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+
+        results.push({ to: num, success: true });
+      } catch (err) {
+        results.push({ to: num, success: false, error: err.message });
+      }
+    }
+    console.log("📌 Stored template mappings:", phoneTemplateMap);
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
+// Webhook Event Handler (POST request) Meta sends POST requests to this endpoint for incoming messages and other events.//
+const processedMessageIds = new Set();
+const phoneTemplateMap = new Map(); // 🔑 set in /api/send-template-mes
 
+/* =====================================================
+   WEBHOOK RECEIVER for interactive messaging for both marriage and autoreply messaging 
+===================================================== */
+app.post("/webhook", (req, res) => {
+  // Respond immediately (Meta requirement)
+  res.status(200).json({ status: "EVENT_RECEIVED" });
 
+  processWebhook(req.body).catch(err =>
+    console.error("❌ Webhook async error:", err.message)
+  );
+});
+
+/* =====================================================
+   WEBHOOK PROCESSOR
+===================================================== */
+async function processWebhook(body) {
+  if (body.object !== "whatsapp_business_account") return;
+
+  const messages = [];
+
+  for (const entry of body.entry || []) {
+    for (const change of entry.changes || []) {
+      if (change.field !== "messages") continue;
+      messages.push(...(change.value?.messages || []));
+    }
+  }
+
+  // De-duplicate messages
+  const newMessages = messages.filter(msg => !processedMessageIds.has(msg.id));
+  newMessages.forEach(msg => processedMessageIds.add(msg.id));
+
+  // Queue processing
+  for (const msg of newMessages) {
+    queue.add(() => handleIncomingMessage(msg));
+  }
+}
+
+/* =====================================================
+   MESSAGE HANDLER
+===================================================== */
+async function handleIncomingMessage(message) {
+  const rawFrom = message.from;
+  const from = normalizePhoneNumber(rawFrom);
+
+  if (allowedReplyNumbers.size && !allowedReplyNumbers.has(from)) {
+    console.log("🚫 Not allowed to reply:", from);
+    return;
+  }
+
+  let replyText = null;
+  let templateName = null;
+  let components = [];
+
+  /* ---------- INTERACTIVE (BUTTON REPLIES) ---------- */
+  if (message.type === "interactive") {
+    const buttonId = message.interactive?.button_reply?.id;
+
+    switch (buttonId) {
+      case "Yes":
+        rsvpResponses[from] = "yes";
+        replyText = "Wonderful! Thank you for confirming your attendance 🎉";
+        break;
+
+      case "No":
+        rsvpResponses[from] = "no";
+        replyText = "Thanks for letting us know. We’ll miss you!";
+        break;
+
+      case "Will Confirm Later":
+        rsvpResponses[from] = "maybe";
+        replyText = "No problem 😊 Please confirm whenever you’re ready.";
+        break;
+
+      default:
+        replyText = "Thank you for your response!";
+    }
+  }
+
+  /* ---------- TEXT MESSAGE → DYNAMIC TEMPLATE ---------- */
+  else if (message.type === "text") {
+    const storedTemplate = phoneTemplateMap.get(from);
+
+    if (!storedTemplate) {
+      console.log("⚠️ No template mapped for", from);
+      return;
+    }
+
+    templateName = storedTemplate;
+    components = [
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: message.text?.body || "" }
+        ]
+      }
+    ];
+  }
+
+  /* ---------- SEND RESPONSE ---------- */
+  if (templateName) {
+    await sendWhatsAppTemplate(from, templateName, "en", components);
+  } else if (replyText) {
+    await sendWhatsAppText(rawFrom, replyText);
+  }
+}
+
+/* =====================================================
+   SEND TEMPLATE MESSAGE
+===================================================== */
+async function sendWhatsAppTemplate(
+  to,
+  templateName,
+  language = "en",
+  components = []
+) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v22.0/${CONFIG.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: language },
+          components
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${CONFIG.ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("✅ Template auto-reply sent:", to, templateName);
+  } catch (err) {
+    console.error("❌ Template send failed:", err.response?.data || err.message);
+  }
+}
+/* =====================================================
+   SEND TEXT MESSAGE
+===================================================== */
+async function sendWhatsAppText(to, body) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("✅ Auto-reply text sent to", to);
+  } catch (err) {
+    console.error("❌ Text send failed:", err.response?.data || err.message);
+  }
+}
 // =======================
 // Get RSVP Status
 // =======================
@@ -1648,49 +1383,52 @@ app.get("/api/rsvp-status", (req, res) => {
     },
   });
 });
+///////////////////// 08. Watsup OTP Generation and Verification //////////////////////////////////////
+function generateOTP(phoneNumber) {
+  const secret = 'MY_SECRET_KEY';
+  const timestamp = Math.floor(Date.now() / 1000 / 60); // changes every minute
+  const hash = crypto.createHmac('sha256', secret).update(phoneNumber + timestamp).digest('hex');
+  const otp = parseInt(hash.substring(0, 6), 16) % 1000000;
+  return otp.toString().padStart(6, '0');
+}
 
+// Sanitize template name (Meta requirement)
+function sanitizeTemplateName(name) {
+  return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 30);
+}
 
-/* ---------------- CREATE TEMPLATE audio,video, ---------------- */
-app.post("/api/create-template1", async (req, res) => {
-  try {
-    const {
-      template_name,
-      media_type,    // "image", "document", "audio", "video"
-      h,             // MEDIA_ID from upload
-      placeholders,  // Array of dynamic texts ["John", "Jane", "25 Dec 2025"]
-      wabaId,
-      accessToken
-    } = req.body;
+// Step 1: Create template
+app.post("/create-template02", async (req, res) => {
+  const { wabaId, accessToken, templateName } = req.body;
 
-    if (!template_name || !media_type || !h || !wabaId || !accessToken) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
+  if (!wabaId || !accessToken || !templateName) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
 
-    // Example body text with placeholders {{1}}, {{2}}, etc.
-    const bodyText = `Hello {{1}}, your {{2}} is ready. Please check it.`;
-
-    const components = [
+  const payload = {
+    name: templateName.toLowerCase().replace(/\s+/g, "_"),
+    language: "en_US",
+    category: "AUTHENTICATION",
+    components: [
       {
-        type: "HEADER",
-        format: media_type.toUpperCase(), // IMAGE, DOCUMENT, AUDIO, VIDEO
-        example: { header_handle: [h] }
-      },
+      type: "BODY",
+      add_security_recommendation: true
+    },
       {
-        type: "BODY",
-        text: bodyText,
-        example: { body_text: [placeholders] } 
+        type: "BUTTONS",
+        buttons: [
+        {
+          type: "OTP",
+           otp_type: "COPY_CODE"
+        }
+      ]
       }
-    ];
+    ]
+  };
 
-    const payload = {
-      name: template_name,
-      language: "en_US",
-      category: "MARKETING",
-      components
-    };
-
+  try {
     const response = await axios.post(
-      `https://graph.facebook.com/v20.0/${wabaId}/message_templates`,
+      `https://graph.facebook.com/v17.0/${wabaId}/message_templates`,
       payload,
       {
         headers: {
@@ -1700,64 +1438,259 @@ app.post("/api/create-template1", async (req, res) => {
       }
     );
 
-    res.json({ success: true, template: response.data });
-  } catch (err) {
-    console.error("Template creation error:", err.response?.data || err.message);
-    res.status(500).json({ error: err.response?.data || "Failed to create template" });
+    res.json(response.data);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data || error.message });
   }
 });
 
-/* ---------------- SEND MESSAGES ---------------- */
-app.post('/api/send-messages1', async (req, res) => {
+
+// Step 2: Send OTP
+app.post('/send-otp', async (req, res) => {
   try {
-    const { phoneNumbers, template_name, placeholder_values, h, media_type, phoneNumberId, accessToken } = req.body;
+    const { phoneNumber, wabaId, accessToken, templateName } = req.body;
+    if (!phoneNumber || !wabaId || !accessToken || !templateName)
+      return res.status(400).json({ error: 'All fields are required' });
 
-    if (!phoneNumbers || !placeholder_values || !h) {
-      return res.status(400).json({ error: 'Required fields missing' });
-    }
+    const otp = generateOTP(phoneNumber);
 
-    const results = [];
-
-    for (const number of phoneNumbers) {
-      const payload = {
+    await axios.post(
+      `https://graph.facebook.com/v22.0/${wabaId}/messages`,
+      {
         messaging_product: 'whatsapp',
-        to: number,
+        to: phoneNumber,
         type: 'template',
         template: {
-          name: template_name,
-          language: { code: 'en_US' },
-          components: [
-            {
-              type: 'header',
-              parameters: [{ [media_type]: { id: h } }]
-            },
-            {
-              type: 'body',
-              parameters: placeholder_values.map(v => ({ type: 'text', text: v }))
-            }
-          ]
-        }
-      };
+          name: templateName,
+          language: { code: 'en' },
+          components: [{ type: 'body', parameters: [{ type: 'text', text: otp }] }],
+        },
+      },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
 
-      try {
-        await axios.post(`https://graph.facebook.com/v22.0/${phoneNumberId}/messages`, payload, {
-          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        });
-        results.push({ number, success: true });
-      } catch (err) {
-        results.push({ number, success: false, error: err.response?.data?.error?.message || err.message });
-      }
-    }
-
-    res.json({ success: true, results });
+    res.json({ success: true, message: 'OTP sent successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(err.response?.data || err);
+    res.status(500).json({ error: err.response?.data || 'Failed to send OTP' });
   }
 });
 
-app.listen(5000, () => console.log('Server running on port 5000'));
+// Step 3: Verify OTP
+app.post('/verify-otp', (req, res) => {
+  const { phoneNumber, userOtp } = req.body;
+  if (!phoneNumber || !userOtp) return res.status(400).json({ error: 'Phone and OTP required' });
+
+  const expectedOtp = generateOTP(phoneNumber);
+  if (userOtp === expectedOtp) {
+    return res.json({ success: true, message: 'OTP verified ✅' });
+  } else {
+    return res.status(400).json({ success: false, message: 'Invalid OTP ❌' });
+  }
+});
 
 
+
+///////////////////////// 09.EXOTAL Phone Call///////////////////////////
+// EXOTEL CALL
+ // 1️⃣ MAKE CALL (SECURE PROXY to Exotel)
+// ------------------------------
+ // ------------------------------
+//  Trigger Exotel Call
+// ------------------------------
+app.post("/api/make-call", async (req, res) => {
+  const { username, password, fromNumber, toNumber, callerId } = req.body;
+
+  if (!username || !password || !fromNumber || !toNumber || !callerId) {
+    return res.status(400).json({ error: "All fields are required" });
+  }
+
+  try {
+    const formData = new URLSearchParams();
+    formData.append("From", fromNumber);
+    formData.append("To", toNumber);
+    formData.append("callerId", callerId);
+    formData.append("record", "true");
+
+    const response = await axios.post(
+      "https://api.exotel.com/v1/Accounts/calibrecueitsolutions1/Calls/connect",
+      formData,
+      {
+        auth: { username, password },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
+
+    res.json(response.data);
+  } catch (error) {
+    console.error("Backend error:", error.response?.data || error.message);
+    res
+      .status(error.response?.status || 500)
+      .json(error.response?.data || { error: error.message });
+  }
+});
+
+// ------------------------------
+// 2️⃣ GET CALL HISTORY
+// ------------------------------
+app.get("/api/call-history", async (req, res) => {
+  const { username, password, accountSid, subDomain, startDate, endDate } = req.query;
+
+  if (!username || !password || !accountSid || !subDomain) {
+    return res.status(400).json({ error: "Missing credentials" });
+  }
+
+  try {
+    let url = `https://${subDomain}/v1/Accounts/${accountSid}/Calls.json`;
+
+    if (startDate && endDate) {
+      const s = startDate.replace(" ", "T");
+      const e = endDate.replace(" ", "T");
+      url += `?StartTime=${encodeURIComponent(s)}&EndTime=${encodeURIComponent(e)}`;
+    }
+
+    const response = await axios.get(url, {
+      auth: { username, password },
+    });
+
+    res.json(response.data);
+  } catch (err) {
+    console.error("Exotel error:", err.response?.data || err.message);
+    res.status(err.response?.status || 500).json(err.response?.data || { error: "Exotel API error" });
+  }
+});
+
+// ------------------------------
+// 3️⃣ GET CALL DETAILS
+// ------------------------------
+app.get("/api/call-details/:sid", async (req, res) => {
+    const { username, password, accountSid, subDomain } = req.query;
+    const callSid = req.params.sid;
+
+    if (!username || !password || !accountSid || !subDomain) {
+        return res.status(400).json({ error: "Missing credentials, AccountSid or SubDomain" });
+    }
+
+    try {
+        const url = `https://${subDomain}/v1/Accounts/${accountSid}/Calls/${callSid}.json`;
+        const response = await axios.get(url, {
+            auth: { username, password },
+        });
+
+        res.json(response.data);
+    } catch (err) {
+        console.error(err.response?.data || err.message);
+        res.status(500).json({ error: "Exotel API error" });
+    }
+});
+
+// ------------------------------
+// 4️⃣ CONNECT.XML (TwiML)
+// ------------------------------
+//4️⃣// CONNECT.XML (TwiML Endpoint - Called by Exotel)
+// ------------------------------
+app.post("/connect.xml", (req, res) => {
+    // Exotel sends 'To' (customer number) in the URL-encoded body
+    const { To } = req.body; 
+
+    const xmlResponse = `
+        <Response>
+            <Say voice="alice">Connecting your call now.</Say>
+            <Dial>${To}</Dial>
+        </Response>
+    `.trim();
+
+    res.header("Content-Type", "application/xml");
+    res.send(xmlResponse);
+});
+///////////////////10. Twilio Messaging services //////////////////////
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  const sql =
+    "SELECT id, phone FROM users WHERE username=? AND password=?";
+
+  db.query(sql, [username, password], (err, results) => {
+    if (err) return res.status(500).json({ message: "DB error" });
+
+    if (results.length === 0) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    res.json({
+      success: true,
+      userId: results[0].id,
+      phone: results[0].phone,
+    });
+  });
+});
+
+app.post("/verify-twilio", async (req, res) => {
+  const { userId, accountSid, authToken, phone } = req.body;
+
+  try {
+    const client = require("twilio")(accountSid, authToken);
+    await client.api.accounts(accountSid).fetch(); // ✅ Twilio validation
+
+    const otp = Math.floor(100000 + Math.random() * 900000);
+
+    db.query(
+      "INSERT INTO otp_verification (user_id, otp) VALUES (?, ?)",
+      [userId, otp]
+    );
+
+    await client.messages.create({
+      to: phone,
+      from: process.env.TWILIO_FROM,
+      body: `Your OTP is ${otp}`,
+    });
+
+    res.json({ success: true, message: "OTP sent" });
+  } catch (err) {
+    res.status(401).json({ message: "Invalid Twilio credentials" });
+  }
+});
+
+app.post("/verify-otp", (req, res) => {
+  const { userId, otp } = req.body;
+
+  db.query(
+    "SELECT * FROM otp_verification WHERE user_id=? AND otp=? AND verified=0",
+    [userId, otp],
+    (err, results) => {
+      if (results.length === 0) {
+        return res.status(401).json({ message: "Invalid OTP" });
+      }
+
+      db.query(
+        "UPDATE otp_verification SET verified=1 WHERE user_id=?",
+        [userId]
+      );
+
+      res.json({ success: true });
+    }
+  );
+});
+
+app.post("/send-sms", async (req, res) => {
+  const { userId, to, from, body, accountSid, authToken } = req.body;
+
+  db.query(
+    "SELECT * FROM otp_verification WHERE user_id=? AND verified=1",
+    [userId],
+    async (err, results) => {
+      if (results.length === 0) {
+        return res.status(403).json({ message: "OTP not verified" });
+      }
+
+      const client = require("twilio")(accountSid, authToken);
+      const msg = await client.messages.create({ to, from, body });
+
+      res.json({ success: true, sid: msg.sid });
+    }
+  );
+});
 // =======================================================
 // 11. START SERVER
 // =======================================================
