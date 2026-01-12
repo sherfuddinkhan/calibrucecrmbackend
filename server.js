@@ -996,25 +996,6 @@ for (const to of cleanNumbers) {
             text
           }))
         },
-        // QUICK REPLY BUTTONS
-        {
-          type: "button",
-          sub_type: "quick_reply",
-          index: "0",
-          parameters: [{ type: "payload", payload: "yes_attend" }]
-        },
-        {
-          type: "button",
-          sub_type: "quick_reply",
-          index: "1",
-          parameters: [{ type: "payload", payload: "no_cant_make" }]
-        },
-        {
-          type: "button",
-          sub_type: "quick_reply",
-          index: "2",
-          parameters: [{ type: "payload", payload: "will_confirm" }]
-        }
       ]
     }
   };
@@ -1070,7 +1051,6 @@ app.post('/api/create-text-template', async (req, res) => {
         }
       ]
     };
-
     const response = await axios.post(
       `https://graph.facebook.com/v22.0/${wabaId}/message_templates`,
       payload,
