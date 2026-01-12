@@ -3,24 +3,24 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import twilio from 'twilio';
 import axios from "axios";
 import multer from 'multer';
 import fs from "fs";
 import bodyParser from 'body-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import PQueue from "p-queue";
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.json()); // Parses JSON from client
 app.use(express.urlencoded({ extended: true })); // Required for TwiML endpoint
 // ✅ ES Modules style
-import PQueue from 'p-queue';
-
 const API_VERSION = 'v22.0';
 import mime from 'mime-types';
-
+import 'dotenv/config'; // Used instead of require("dotenv").config()
+import sql from 'mssql'; // <--- Use 'import' instead of 'require'
+import twilio from 'twilio';
 // --- Express App Setup ---
 
 // Multer setup to store file in memory (buffer)
@@ -126,15 +126,6 @@ const __dirname = path.dirname(__filename);
 
 const allowedOrigins = ["http://localhost:3000","http://localhost:3001"];
 
-
-// Setup Multer to handle file uploads, saving to the 'uploads' folder
-const upload2 = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }
-});
-
-
-
 /** * Utility: Detect WhatsApp media type from MIME 
  * This is needed for the final /messages API call.
  */
@@ -147,8 +138,22 @@ const getMediaType = (mime) => {
   return "document";
 };
 
+  
+
+app.use(bodyParser.json({ limit: '1mb' }));
+
+app.use(bodyParser.json());
+
+const TOKEN_STORE = {};
+
+const normalizePhoneNumber = (num) =>
+  typeof num === 'string' ? num.replace(/\s/g, '').replace(/^\+/, '') : '';
+app.use(bodyParser.urlencoded({ extended: true }));
+
+/* ================= MULTER ================= */
+const upload1 = multer({storage: multer.memoryStorage(),limits: { fileSize: 25 * 1024 * 1024 }});
 // The endpoint the React frontend calls
-app.post("/upload1", upload2.single("file"), async (req, res) => {
+app.post("/upload1", upload1.single("file"), async (req, res) => {
   // Get dynamic inputs
   const appId = req.headers["x-app-id"]; // From custom header
   const { accessToken } = req.body;      // From form-data body
@@ -158,7 +163,7 @@ app.post("/upload1", upload2.single("file"), async (req, res) => {
   }
 
   // File metadata from Multer
-  const { path, originalname, mimetype, size } = req.file;
+  const { path, originalname, mimetype, size ,buffer } = req.file;
   const mediaType = getMediaType(mimetype);
   
   try {
@@ -182,12 +187,9 @@ app.post("/upload1", upload2.single("file"), async (req, res) => {
     const uploadId = sessionRes.data.id; // e.g., "upload:1171617668480245"
     console.log("STEP 1 Success: Upload Session ID created:", uploadId);
     
-    // --- STEP 2: Upload file binary ---
-    const fileBuffer = fs.readFileSync(path); // Read the temporary file into a buffer
-
     const uploadRes = await axios.post(
       `https://graph.facebook.com/v24.0/${uploadId}`, // Use the session ID
-      fileBuffer, // Pass the raw binary buffer as the body
+      buffer, // Pass the raw binary buffer as the body
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -202,9 +204,6 @@ app.post("/upload1", upload2.single("file"), async (req, res) => {
 
     console.log("STEP 2 Success: File uploaded. Media Handle (h) received.");
 
-    // --- Cleanup and Final Response ---
-    fs.unlinkSync(path); // MANDATORY: Delete the temporary file from the 'uploads' folder
-
     // Return the media handle (h) and file details to the React frontend
     return res.json({
       h: uploadRes.data.h, // The final media ID needed for the /messages API
@@ -217,12 +216,6 @@ app.post("/upload1", upload2.single("file"), async (req, res) => {
   } catch (error) {
     // Log the detailed error from Meta/Axios
     console.error("META API Error:", error.response?.data || error.message);
-    
-    // Clean up temporary file even on error
-    if (fs.existsSync(path)) {
-        fs.unlinkSync(path);
-    }
-    
     // Return the error to the React frontend
     return res.status(500).json({
       error: error.response?.data || error.message
@@ -231,19 +224,10 @@ app.post("/upload1", upload2.single("file"), async (req, res) => {
 });
 
 
-app.use(bodyParser.json({ limit: '1mb' }));
-
-app.use(bodyParser.json());
-
-const TOKEN_STORE = {};
-
-const normalizePhoneNumber = (num) =>
-  typeof num === 'string' ? num.replace(/\s/g, '').replace(/^\+/, '') : '';
-app.use(bodyParser.urlencoded({ extended: true }));
-/* ================= MULTER ================= */
-const upload = multer({storage: multer.memoryStorage(),limits: { fileSize: 25 * 1024 * 1024 }});
-
-app.post('/api/upload-media', upload.single('file'), async (req, res) => {
+app.post('/api/upload-media', upload1.single('file'), async (req, res) => {
+  console.log('--- Multer Debug ---');
+  console.log('req.body:', req.body); // Should contain accessToken, phoneNumberId
+  console.log('req.file:', req.file); // Should contain the file buffer/metadata
   try {
     const { phoneNumberId, accessToken } = req.body;
     const file = req.file;
@@ -882,52 +866,35 @@ Join us in celebrating the sacred union of
 Your presence will make our day complete! 💍✨`;
 
     const payload = {
-  name: template_name,
-  language: "en_US",
-  category: "MARKETING", // ✅ safer for invitations
-  components: [
-    {
-      type: "HEADER",
-      format: "IMAGE",
-      example: {
-        header_handle: [header_media_id]
-      }
-    },
-    {
-      type: "BODY",
-      text: bodyText,
-      example: {
-        body_text: [placeholders]
-      }
-    },
-    {
-      type: "BUTTONS",  // ✅ wrap type + buttons in an object
+      name: template_name,
+      language: "en_US",
+      category: "MARKETING", // ✅ safer for invitations
+      components: [
+        {
+          type: "HEADER",
+          format: "IMAGE",
+          example: {
+            header_handle: [header_media_id]
+          }
+        },
+        {
+          type: "BODY",
+          text: bodyText,
+          example: {
+            body_text: [placeholders]
+          }
+        },
+       {
+      type: "BUTTONS",
       buttons: [
-        {
-          type: "QUICK_REPLY",
-          reply: {
-            id: "yes_attend",
-            title: "Yes, I'll attend"
-          }
-        },
-        {
-          type: "QUICK_REPLY",
-          reply: {
-            id: "no_cant_make",
-            title: "No, can't make it"
-          }
-        },
-        {
-          type: "QUICK_REPLY",
-          reply: {
-            id: "will_confirm",
-            title: "Will confirm later"
-          }
-        }
+        { type: "QUICK_REPLY", text: "Yes, I'll attend" },
+        { type: "QUICK_REPLY", text: "No, can't make it" },
+        { type: "QUICK_REPLY", text: "Will confirm later" }
       ]
     }
-  ]
-};
+      ]
+    };
+
 
 
     const response = await axios.post(
@@ -1003,34 +970,54 @@ app.post("/api/send-invitation", async (req, res) => {
     const results = [];
 
     /* ================= SEND LOOP ================= */
-    for (const to of cleanNumbers) {
-      const payload = {
-        messaging_product: "whatsapp",
-        to,
-        type: "template",
-        template: {
-          name: templateName,
-          language: { code: "en_US" },
-          components: [
+     /* ================= SEND LOOP ================= */
+for (const to of cleanNumbers) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName.toLowerCase(),
+      language: { code: "en_US" },
+      components: [
+        {
+          type: "header",
+          parameters: [
             {
-              type: "header",
-              parameters: [
-                {
-                  type: "image",
-                  image: { id: mediaHandle }
-                }
-              ]
-            },
-            {
-              type: "body",
-              parameters: placeholders.map(text => ({
-                type: "text",
-                text
-              }))
+              type: "image",
+              image: { id: mediaHandle }
             }
           ]
+        },
+        {
+          type: "body",
+          parameters: placeholders.map(text => ({
+            type: "text",
+            text
+          }))
+        },
+        // QUICK REPLY BUTTONS
+        {
+          type: "button",
+          sub_type: "quick_reply",
+          index: "0",
+          parameters: [{ type: "payload", payload: "yes_attend" }]
+        },
+        {
+          type: "button",
+          sub_type: "quick_reply",
+          index: "1",
+          parameters: [{ type: "payload", payload: "no_cant_make" }]
+        },
+        {
+          type: "button",
+          sub_type: "quick_reply",
+          index: "2",
+          parameters: [{ type: "payload", payload: "will_confirm" }]
         }
-      };
+      ]
+    }
+  };
 
       try {
         await axios.post(
@@ -1043,6 +1030,7 @@ app.post("/api/send-invitation", async (req, res) => {
             }
           }
         );
+
         results.push({ number: to, success: true });
       } catch (err) {
         results.push({
@@ -1111,48 +1099,78 @@ app.post('/api/create-text-template', async (req, res) => {
    API: SEND TEMPLATE MESSAGES for Autoreply
 ===================================================== */
 
-app.post('/api/send-template-messages', async (req, res) => {
+app.post("/api/send-template-messages", async (req, res) => {
   try {
     const { templateName, phoneNumbers, accessToken, phoneNumberId } = req.body;
 
-    if (!templateName || !phoneNumbers?.length) {
-      return res.status(400).json({ error: 'Missing data' });
+    if (
+      !templateName ||
+      !Array.isArray(phoneNumbers) ||
+      phoneNumbers.length === 0 ||
+      !accessToken ||
+      !phoneNumberId
+    ) {
+      return res.status(400).json({ error: "Missing required data" });
     }
-      const normalized = num.replace(/\D/g, '');
-        // ✅ STORE TEMPLATE FOR WEBHOOK USE
-      phoneTemplateMap.set(normalized, templateName);
+
     const results = [];
 
     for (const num of phoneNumbers) {
+      const normalized = num.replace(/\D/g, "");
+
+      if (normalized.length < 10) {
+        results.push({
+          to: num,
+          success: false,
+          error: "Invalid phone number"
+        });
+        continue;
+      }
+
+      // ✅ STORE TEMPLATE FOR WEBHOOK USE
+      phoneTemplateMap.set(normalized, templateName);
+
       try {
         const payload = {
-          messaging_product: 'whatsapp',
+          messaging_product: "whatsapp",
           to: normalized,
-          type: 'template',
+          type: "template",
           template: {
             name: templateName,
-            language: { code: 'en_US' }
-            // ❌ NO components
+            language: { code: "en_US" }
           }
         };
 
-        const resp = await axios.post(
+        await axios.post(
           `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
           payload,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          }
         );
 
-        results.push({ to: num, success: true });
+        results.push({ to: normalized, success: true });
       } catch (err) {
-        results.push({ to: num, success: false, error: err.message });
+        results.push({
+          to: normalized,
+          success: false,
+          error: err.response?.data || err.message
+        });
       }
     }
-    console.log("📌 Stored template mappings:", phoneTemplateMap);
+
+    console.log("📌 Stored template mappings:", [...phoneTemplateMap.entries()]);
+
     res.json({ success: true, results });
   } catch (err) {
+    console.error("❌ Send template error:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // Webhook Event Handler (POST request) Meta sends POST requests to this endpoint for incoming messages and other events.//
 const processedMessageIds = new Set();
@@ -1161,6 +1179,11 @@ const phoneTemplateMap = new Map(); // 🔑 set in /api/send-template-mes
 /* =====================================================
    WEBHOOK RECEIVER for interactive messaging for both marriage and autoreply messaging 
 ===================================================== */
+const queue = new PQueue({
+  concurrency: 1,   // process one message at a time
+  intervalCap: 10,  // optional rate limit
+  interval: 1000
+});
 app.post("/webhook", (req, res) => {
   // Respond immediately (Meta requirement)
   res.status(200).json({ status: "EVENT_RECEIVED" });
@@ -1275,7 +1298,7 @@ async function sendWhatsAppTemplate(
 ) {
   try {
     await axios.post(
-      `https://graph.facebook.com/v22.0/${CONFIG.PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
         to,
@@ -1288,7 +1311,7 @@ async function sendWhatsAppTemplate(
       },
       {
         headers: {
-          Authorization: `Bearer ${CONFIG.ACCESS_TOKEN}`,
+          Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
           "Content-Type": "application/json"
         }
       }
@@ -1453,6 +1476,8 @@ app.post("/create-template02", async (req, res) => {
     res.status(500).json({ error: error.response?.data || error.message });
   }
 });
+
+
 // Step 2: Send OTP
 app.post('/send-otp', async (req, res) => {
   try {
@@ -1612,96 +1637,263 @@ app.post("/connect.xml", (req, res) => {
     res.send(xmlResponse);
 });
 ///////////////////10. Twilio Messaging services //////////////////////
-app.post("/login", (req, res) => {
-  const { username, password } = req.body;
 
-  const sql =
-    "SELECT id, phone FROM users WHERE username=? AND password=?";
+/* ================= DATABASE CONFIGURATION ================= */
 
-  db.query(sql, [username, password], (err, results) => {
-    if (err) return res.status(500).json({ message: "DB error" });
+const dbConfig = {
+  server: "DESKTOP-BUGKGO7",
+  database: "TwilioDB",
+  user: "nodeuser",
+  password: "Node@123",
+  options: {
+    encrypt: false,
+    trustServerCertificate: true
+  }
+};
 
-    if (results.length === 0) {
-      return res.status(401).json({ message: "Invalid credentials" });
+// Global Connection Pool Promise
+const poolPromise = new sql.ConnectionPool(dbConfig)
+  .connect()
+  .then(pool => {
+    console.log("✅ DB Connected");
+    return pool;
+  })
+  .catch(err => {
+    console.error("❌ DB Error", err.message);
+    // If the DB connection fails, exit the process immediately
+    process.exit(1);
+  });
+
+
+/* ================= API Endpoints (STRICTLY CUSTOM LOGIC) ================= */
+
+// Helper function to get pool instance and handle connection errors
+async function getDbPool(res) {
+    let pool;
+    try {
+        pool = await poolPromise;
+        return pool;
+    } catch (e) {
+        console.error('Database pool is unavailable:', e);
+        res.status(503).json({ success: false, message: 'Database service unavailable.' });
+        return null;
+    }
+}
+
+// --- STEP 1: LOGIN VERIFY (Sets Users.is_verified = 1) ---
+// Condition: is_verified must be TRUE when login credentials match. (Step 1 -> Step 2)
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ success: false, message: "Username and password required" });
+  }
+    const pool = await getDbPool(res);
+    if (!pool) return;
+
+  try {
+    // 1. Verify Username and Password
+    const result = await pool.request()
+      .input("username", sql.VarChar, username)
+      .input("password", sql.VarChar, password)
+      .query(`
+        SELECT id
+        FROM dbo.Users 
+        WHERE username=@username AND password=@password
+      `);
+
+    if (!result.recordset.length) {
+      return res.status(401).json({ success: false, message: "Invalid username or password" });
+    }
+
+    const userId = result.recordset[0].id;
+
+    // 2. CRITICAL: Set Users.is_verified = 1 immediately after credentials match
+    await pool.request()
+        .input("userId", sql.Int, userId)
+        .query(`UPDATE dbo.Users SET is_verified = 1 WHERE id = @userId`);
+    
+    // 3. Login is successful (Frontend moves to Step 2)
+    res.json({ success: true, userId: userId });
+
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// --- STEP 2: TWILIO CREDENTIAL VERIFICATION ---
+app.post("/api/verify-twilio", async (req, res) => {
+  const { sid, token } = req.body;
+  
+  if (!sid || !token) {
+    return res.status(400).json({ success: false, message: "SID and Token required" });
+  }
+  
+  try {
+    const client = twilio(sid, token);
+    await client.api.accounts(sid).fetch(); 
+    res.json({ success: true, message: "Twilio credentials are valid" });
+  } catch (err) {
+    console.error("Twilio verification failed:", err.message);
+    res.status(401).json({ success: false, message: "Invalid Twilio credentials" });
+  }
+});
+
+// --- STEP 3: SEND OTP (Initializes OTP record with is_verified = 0) ---
+app.post("/api/send-otp", async (req, res) => {
+  const { userId, phone, twilioData } = req.body;
+  
+  if (!userId || !phone || !twilioData || !twilioData.sid || !twilioData.from) {
+    return res.status(400).json({ success: false, message: "Missing required data" });
+  }
+
+    const pool = await getDbPool(res);
+    if (!pool) return;
+
+  try {
+    const otp = Math.floor(100000 + Math.random() * 900000);
+
+    // 1. Store OTP in dbo.OTPs with is_verified = 0 (unused)
+    await pool.request()
+      .input("userId", sql.Int, userId)
+      .input("otp", sql.Int, otp)
+      .query(`
+        INSERT INTO dbo.OTPs (user_id, otp_code, is_verified, created_at)
+        VALUES (@userId, @otp, 0, GETDATE())
+      `);
+
+    // 2. Send SMS via Twilio
+    const { sid, token, from } = twilioData;
+    const client = twilio(sid, token);
+    const body = `Your verification code is: ${otp}.`;
+    
+    await client.messages.create({ 
+      from, 
+      to: phone, 
+      body 
+    });
+
+    res.json({ success: true, message: "OTP generated and sent successfully" });
+
+  } catch (err) {
+    console.error("Send OTP error:", err);
+    res.status(500).json({ success: false, message: "Failed to send SMS." });
+  }
+});
+
+// --- STEP 4: OTP VERIFY (Updates OTPs.is_verified = 1, DOES NOT affect Users.is_verified) ---
+app.post("/api/verify-otp", async (req, res) => {
+  const { userId, otp } = req.body;
+  
+    if (!userId || !otp) {
+        return res.status(400).json({ success: false, message: "User ID and OTP are required for verification." });
     }
 
-    res.json({
-      success: true,
-      userId: results[0].id,
-      phone: results[0].phone,
-    });
-  });
-});
+    const pool = await getDbPool(res);
+    if (!pool) return;
+    
+  try {
+    // 1. Check for a valid, unused, unexpired OTP
+    const result = await pool.request()
+      .input("userId", sql.Int, userId) 
+      .input("otp", sql.Int, otp)     
+      .query(`
+        SELECT TOP 1 id
+        FROM dbo.OTPs
+        WHERE user_id=@userId 
+          AND otp_code=@otp 
+          AND is_verified=0                           
+          AND created_at > DATEADD(minute, -5, GETDATE())
+        ORDER BY id DESC
+      `);
 
-app.post("/verify-twilio", async (req, res) => {
-  const { userId, accountSid, authToken, phone } = req.body;
-
-  try {
-    const client = require("twilio")(accountSid, authToken);
-    await client.api.accounts(accountSid).fetch(); // ✅ Twilio validation
-
-    const otp = Math.floor(100000 + Math.random() * 900000);
-
-    db.query(
-      "INSERT INTO otp_verification (user_id, otp) VALUES (?, ?)",
-      [userId, otp]
-    );
-
-    await client.messages.create({
-      to: phone,
-      from: process.env.TWILIO_FROM,
-      body: `Your OTP is ${otp}`,
-    });
-
-    res.json({ success: true, message: "OTP sent" });
-  } catch (err) {
-    res.status(401).json({ message: "Invalid Twilio credentials" });
-  }
-});
-
-app.post("/verify-otp", (req, res) => {
-  const { userId, otp } = req.body;
-
-  db.query(
-    "SELECT * FROM otp_verification WHERE user_id=? AND otp=? AND verified=0",
-    [userId, otp],
-    (err, results) => {
-      if (results.length === 0) {
-        return res.status(401).json({ message: "Invalid OTP" });
-      }
-
-      db.query(
-        "UPDATE otp_verification SET verified=1 WHERE user_id=?",
-        [userId]
-      );
-
-      res.json({ success: true });
+    if (!result.recordset.length) {
+      return res.status(400).json({ success: false, message: "Invalid, expired, or already used OTP" });
     }
-  );
+
+    // 2. Mark the specific OTP entry as verified/used in dbo.OTPs (is_verified = 1)
+    const otpId = result.recordset[0].id;
+    
+    await pool.request()
+      .input("id", sql.Int, otpId)
+      .query(`UPDATE dbo.OTPs SET is_verified=1 WHERE id=@id`);
+    
+    // 🛑 IMPORTANT: NO UPDATE to dbo.Users here, matching your required flow.
+
+    res.json({ success: true, message: "OTP verified successfully. Authorization is maintained." });
+    
+  } catch (err) {
+    console.error("Verify OTP error:", err);
+    res.status(500).json({ success: false, message: "Server error during verification" });
+  }
 });
 
-app.post("/send-sms", async (req, res) => {
-  const { userId, to, from, body, accountSid, authToken } = req.body;
+// --- STEP 5: SEND SMS (Post-Verification/Authorization Check) ---
+app.post("/api/send-sms", async (req, res) => {
+  // Authorization check is done by frontend using Users.is_verified=1 set in Step 1
+  const { to, message, twilioData } = req.body; 
+  
+  if (!twilioData || !twilioData.sid || !to || !message) {
+     return res.status(400).json({ success: false, message: "Missing required data for SMS." });
+  }
 
-  db.query(
-    "SELECT * FROM otp_verification WHERE user_id=? AND verified=1",
-    [userId],
-    async (err, results) => {
-      if (results.length === 0) {
-        return res.status(403).json({ message: "OTP not verified" });
-      }
+  try {
+    // Send SMS
+    const { sid, token, from } = twilioData;
+    const client = twilio(sid, token);
+    await client.messages.create({ from, to, body: message });
 
-      const client = require("twilio")(accountSid, authToken);
-      const msg = await client.messages.create({ to, from, body });
+    res.json({ success: true, message: "SMS sent successfully" });
 
-      res.json({ success: true, sid: msg.sid });
+  } catch (err) {
+    console.error("Send SMS error:", err);
+    res.status(500).json({ success: false, message: "Server error or Twilio failed to send SMS" });
+  }
+});
+
+
+// --- STEP 6: RESET VERIFICATION (Sets Users.is_verified = 0) ---
+// Condition: is_verified must be FALSE after the session/logout/reset. (Step 5 -> Step 1)
+app.post('/api/reset-verification', async (req, res) => {
+    const { userId } = req.body; 
+
+    if (!userId) {
+        return res.status(400).json({ success: false, message: 'User ID is required for verification reset.' });
     }
-  );
+
+    const pool = await getDbPool(res);
+    if (!pool) return;
+    
+    try {
+        const request = pool.request(); 
+        request.input('userId', sql.Int, userId); 
+
+        // CRITICAL: Set Users.is_verified = 0 for the user
+        const query = `
+            UPDATE dbo.Users 
+            SET is_verified = 0 
+            WHERE id = @userId;
+        `;
+        
+        const result = await request.query(query); 
+
+        if (result.rowsAffected[0] > 0) {
+            console.log(`[RESET SUCCESS] User ID ${userId} verification status reset to 0 (FALSE).`);
+        } else {
+            console.warn(`[RESET FAILED] No rows affected for User ID ${userId}.`);
+        }
+        
+        res.json({ success: true, message: 'Reset complete.' });
+
+    } catch (error) {
+        console.error('[DB ERROR] Database Error during verification reset:', error); 
+        res.status(500).json({ success: false, message: 'Server error during verification reset.' });
+    }
 });
-// =======================================================
-// 11. START SERVER
-// =======================================================
-app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-  console.log(`📡 Webhook URL: http://localhost:${PORT}/webhook`);
-});
+
+/* ================= START SERVER ================= */
+
+app.listen(PORT, () =>
+  console.log(`🚀 Server running on http://localhost:${PORT}`)
+);
