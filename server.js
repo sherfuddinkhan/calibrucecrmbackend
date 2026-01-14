@@ -765,7 +765,7 @@ app.post("/api/send-template03", async (req, res) => {
     for (const number of phoneNumbers) {
       try {
         const response = await axios.post(
-          `https://graph.facebook.com/v16.0/${phoneNumberId}/messages`,
+          `https://graph.facebook.com/v24.0/${phoneNumberId}/messages`,
           {
             messaging_product: "whatsapp",
             to: number,
@@ -894,11 +894,8 @@ Your presence will make our day complete! 💍✨`;
     }
       ]
     };
-
-
-
     const response = await axios.post(
-      `https://graph.facebook.com/v20.0/${wabaId}/message_templates`,
+      `https://graph.facebook.com/v24.0/${wabaId}/message_templates`,
       payload,
       {
         headers: {
@@ -968,41 +965,58 @@ app.post("/api/send-invitation", async (req, res) => {
     }
 
     const results = [];
-
-    /* ================= SEND LOOP ================= */
      /* ================= SEND LOOP ================= */
 for (const to of cleanNumbers) {
-  const payload = {
-    messaging_product: "whatsapp",
-    to,
-    type: "template",
-    template: {
-      name: templateName.toLowerCase(),
-      language: { code: "en_US" },
-      components: [
-        {
-          type: "header",
-          parameters: [
-            {
-              type: "image",
-              image: { id: mediaHandle }
-            }
-          ]
-        },
-        {
-          type: "body",
-          parameters: placeholders.map(text => ({
-            type: "text",
-            text
-          }))
-        },
-      ]
-    }
-  };
+ const payload = {
+  messaging_product: "whatsapp",
+  to,
+  type: "template",
+  template: {
+    name: templateName.toLowerCase(),
+    language: { code: "en_US" },
+    components: [
+      {
+        type: "header",
+        parameters: [
+          {
+            type: "image",
+            image: { id: mediaHandle }
+          }
+        ]
+      },
+      {
+        type: "body",
+        parameters: placeholders.map(text => ({
+          type: "text",
+          text
+        }))
+      },
+      /* ================= BUTTON COMPONENTS ================= */
+      {
+        type: "button",
+        sub_type: "quick_reply",
+        index: "0", // Button: "Yes, I'll attend"
+        parameters: [{ type: "payload", payload: "Yes, I'll attend" }]
+      },
+      {
+        type: "button",
+        sub_type: "quick_reply",
+        index: "1", // Button: "No, can't make it"
+        parameters: [{ type: "payload", payload: "No, can't make it" }]
+      },
+      {
+        type: "button",
+        sub_type: "quick_reply",
+        index: "2", // Button: "Will confirm later"
+        parameters: [{ type: "payload", payload: "Will confirm later" }]
+      }
+    ]
+  }
+};
 
       try {
         await axios.post(
-          `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
+          `https://graph.facebook.com/v24.0/${phoneNumberId}/messages`,
           payload,
           {
             headers: {
@@ -1051,6 +1065,7 @@ app.post('/api/create-text-template', async (req, res) => {
         }
       ]
     };
+
     const response = await axios.post(
       `https://graph.facebook.com/v22.0/${wabaId}/message_templates`,
       payload,
@@ -1164,170 +1179,161 @@ const queue = new PQueue({
   intervalCap: 10,  // optional rate limit
   interval: 1000
 });
-app.post("/webhook", (req, res) => {
-  // Respond immediately (Meta requirement)
-  res.status(200).json({ status: "EVENT_RECEIVED" });
+app.post('/webhook', async (req, res) => {
+    console.log('Webhook event received. Processing...');
 
-  processWebhook(req.body).catch(err =>
-    console.error("❌ Webhook async error:", err.message)
-  );
+    try {
+        if (
+            req.body.object === 'whatsapp_business_account' &&
+            Array.isArray(req.body.entry)
+        ) {
+            for (const entry of req.body.entry) {
+                for (const change of entry.changes || []) {
+                    if (
+                        change.field === 'messages' &&
+                        Array.isArray(change.value?.messages)
+                    ) {
+                        for (const message of change.value.messages) {
+
+                            const rawFrom = message.from;
+                            const from = normalizePhoneNumber(rawFrom);
+
+                            /* ---------------- TEXT MESSAGE ---------------- */
+                            const receivedMessageBody = message.text?.body || null;
+
+                            /* ------------ INTERACTIVE BUTTON -------------- */
+                            const interactiveReplyId =
+                                message.interactive?.button_reply?.id || null;
+
+                            const interactiveReplyTitle =
+                                message.interactive?.button_reply?.title || null;
+
+                            console.log(`[Webhook] From: ${rawFrom} → ${from}`);
+                            console.log(`[Webhook] Text: ${receivedMessageBody || 'N/A'}`);
+                            console.log(
+                                `[Webhook] Button ID: ${interactiveReplyId || 'N/A'}, Title: ${interactiveReplyTitle || 'N/A'}`
+                            );
+
+                            let autoReplySent = false;
+
+                            /* =================================================
+                               HANDLE INTERACTIVE BUTTON REPLIES
+                            ================================================= */
+                          if (interactiveReplyId) {
+    console.log(`[Debug] Processing interactive reply from ${from}`);
+    console.log(`[Webhook] Interactive reply details: ${interactiveReplyTitle} (${interactiveReplyId})`);
+
+    // Debug environment variables
+    console.log(`[Debug] ACCESS_TOKEN: ${process.env.ACCESS_TOKEN ? 'SET' : 'MISSING'}`);
+    console.log(`[Debug] PHONE_NUMBER_ID: ${process.env.PHONE_NUMBER_ID || 'MISSING'}`);
+
+    // Save RSVP response
+    rsvpResponses[from] = interactiveReplyId;
+
+    // Prepare reply message based on button clicked
+    let replyMessage;
+    switch (interactiveReplyId) {
+        case "Yes, I'll attend":
+            replyMessage = "Wonderful! Thank you for confirming your attendance 🎉";
+            break;
+
+        case "No, can't make it":
+            replyMessage = "Thanks for letting us know. We’ll miss you!";
+            break;
+
+        case "Will confirm later":
+            replyMessage = "No worries 😊 Please confirm whenever you’re ready.";
+            break;
+
+        default:
+            replyMessage = "Thank you for your response!";
+    }
+
+    // Send the reply via WhatsApp API
+    try {
+        const response = await axios.post(
+            `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to: rawFrom,
+                type: 'text',
+                text: { body: replyMessage }
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        console.log(`✅ Auto-reply sent to ${rawFrom}`);
+        console.log('[Debug] WhatsApp API response:', response.data);
+        autoReplySent = true;
+
+    } catch (error) {
+        console.error(`❌ Failed to send auto-reply to ${rawFrom}`);
+        console.error('[Debug] Error details:', error.response?.data || error.message);
+    }
+}
+
+
+                            /* =================================================
+                               HANDLE NORMAL TEXT MESSAGE
+                            ================================================= */
+                            else if (
+                                receivedMessageBody &&
+                               !autoReplySent
+                            ) {
+                                const replyMessage =
+                                    `Thank you for your message: "${receivedMessageBody}". We’ll get back to you shortly 😊`;
+                                await axios.post(
+                                    `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`,
+                                    {
+                                        messaging_product: 'whatsapp',
+                                        to: rawFrom,
+                                        type: 'text',
+                                        text: { body: replyMessage }
+                                    },
+                                    {
+                                        headers: {
+                                            Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
+                                            'Content-Type': 'application/json'
+                                        }
+                                    }
+                                );
+                                console.log(`✅ Text auto-reply sent to ${rawFrom}`);
+                            } else {
+                                console.log(
+                                    `[Webhook] No auto-reply sent for ${from}`
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            return res.status(200).json({
+                status: 'EVENT_RECEIVED',
+                message: 'Webhook processed successfully'
+            });
+        }
+
+        console.log('Ignored non-WhatsApp event');
+        return res.status(200).json({ status: 'IGNORED' });
+
+    } catch (error) {
+        console.error(
+            '❌ Webhook processing error:',
+            error.response?.data || error.message
+        );
+        return res.status(500).json({
+            success: false,
+            error: 'Webhook processing failed'
+        });
+    }
 });
 
-/* =====================================================
-   WEBHOOK PROCESSOR
-===================================================== */
-async function processWebhook(body) {
-  if (body.object !== "whatsapp_business_account") return;
-
-  const messages = [];
-
-  for (const entry of body.entry || []) {
-    for (const change of entry.changes || []) {
-      if (change.field !== "messages") continue;
-      messages.push(...(change.value?.messages || []));
-    }
-  }
-
-  // De-duplicate messages
-  const newMessages = messages.filter(msg => !processedMessageIds.has(msg.id));
-  newMessages.forEach(msg => processedMessageIds.add(msg.id));
-
-  // Queue processing
-  for (const msg of newMessages) {
-    queue.add(() => handleIncomingMessage(msg));
-  }
-}
-
-/* =====================================================
-   MESSAGE HANDLER
-===================================================== */
-async function handleIncomingMessage(message) {
-  const rawFrom = message.from;
-  const from = normalizePhoneNumber(rawFrom);
-
-  if (allowedReplyNumbers.size && !allowedReplyNumbers.has(from)) {
-    console.log("🚫 Not allowed to reply:", from);
-    return;
-  }
-
-  let replyText = null;
-  let templateName = null;
-  let components = [];
-
-  /* ---------- INTERACTIVE (BUTTON REPLIES) ---------- */
-  if (message.type === "interactive") {
-    const buttonId = message.interactive?.button_reply?.id;
-
-    switch (buttonId) {
-      case "Yes":
-        rsvpResponses[from] = "yes";
-        replyText = "Wonderful! Thank you for confirming your attendance 🎉";
-        break;
-
-      case "No":
-        rsvpResponses[from] = "no";
-        replyText = "Thanks for letting us know. We’ll miss you!";
-        break;
-
-      case "Will Confirm Later":
-        rsvpResponses[from] = "maybe";
-        replyText = "No problem 😊 Please confirm whenever you’re ready.";
-        break;
-
-      default:
-        replyText = "Thank you for your response!";
-    }
-  }
-
-  /* ---------- TEXT MESSAGE → DYNAMIC TEMPLATE ---------- */
-  else if (message.type === "text") {
-    const storedTemplate = phoneTemplateMap.get(from);
-
-    if (!storedTemplate) {
-      console.log("⚠️ No template mapped for", from);
-      return;
-    }
-
-    templateName = storedTemplate;
-    components = [
-      {
-        type: "body",
-        parameters: [
-          { type: "text", text: message.text?.body || "" }
-        ]
-      }
-    ];
-  }
-
-  /* ---------- SEND RESPONSE ---------- */
-  if (templateName) {
-    await sendWhatsAppTemplate(from, templateName, "en", components);
-  } else if (replyText) {
-    await sendWhatsAppText(rawFrom, replyText);
-  }
-}
-
-/* =====================================================
-   SEND TEMPLATE MESSAGE
-===================================================== */
-async function sendWhatsAppTemplate(
-  to,
-  templateName,
-  language = "en",
-  components = []
-) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "template",
-        template: {
-          name: templateName,
-          language: { code: language },
-          components
-        }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    console.log("✅ Template auto-reply sent:", to, templateName);
-  } catch (err) {
-    console.error("❌ Template send failed:", err.response?.data || err.message);
-  }
-}
-/* =====================================================
-   SEND TEXT MESSAGE
-===================================================== */
-async function sendWhatsAppText(to, body) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    console.log("✅ Auto-reply text sent to", to);
-  } catch (err) {
-    console.error("❌ Text send failed:", err.response?.data || err.message);
-  }
-}
 // =======================
 // Get RSVP Status
 // =======================
@@ -1352,16 +1358,16 @@ app.get("/api/rsvp-status", (req, res) => {
       `[RSVP Debug] Number: ${number}, Payload: ${normalizedPayload}`
     );
 
-    switch (normalizedPayload) {
-      case "yes":
+    switch (payload) {
+      case "Yes, I'll attend":
         yesCount++;
         break;
 
-      case "no":
+      case "No, can't make it":
         noCount++;
         break;
 
-      case "will-confirm-later":
+      case "Will confirm later":
       case "maybe":
         maybeCount++;
         break;
@@ -1440,7 +1446,7 @@ app.post("/create-template02", async (req, res) => {
 
   try {
     const response = await axios.post(
-      `https://graph.facebook.com/v17.0/${wabaId}/message_templates`,
+      `https://graph.facebook.com/v124.0/${wabaId}/message_templates`,
       payload,
       {
         headers: {
